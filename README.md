@@ -122,6 +122,11 @@ Ortsliste: [GeoNames](https://www.geonames.org) (CC BY 4.0), Ländergrenzen: [Na
 Alles liegt im Ordner `daten`: `index.sqlite` (Suchindex), `vorschau` (Vorschaubilder), `modelle`,
 `protokolle` (für Rückgängig), `kacheln` (Kartenbilder), `einstellungen.json` und `imgsortsearch.log`.
 
+Speicherplatz: Unter Einstellungen > „Modelle und Speicherplatz“ stehen alle heruntergeladenen Modelle mit Größe.
+Modelle für ausgeschaltete Funktionen oder alte Versionen lassen sich dort löschen (mit Bestätigung). Schaltet man die
+Funktion später wieder ein, wird das Modell automatisch neu geladen. Den Download-Zwischenspeicher der Pakete
+(`umgebung\cache`) leeren `install.bat` und `update.bat` am Ende selbst.
+
 ## Entwicklung
 
 ```bash
