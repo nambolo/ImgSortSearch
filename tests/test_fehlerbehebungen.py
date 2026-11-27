@@ -263,3 +263,49 @@ def test_kaputte_einstellungen_werden_gesichert(heim):
     assert datei.with_name("e.json.defekt").read_text("utf-8").startswith('{"quellen"')
     e.aktualisieren({"port": 1})
     assert json.loads(datei.read_text("utf-8"))["port"] == 1
+
+
+def test_exif_wird_gelesen_solange_datei_offen(tmp_path, monkeypatch):
+    """Windows/TIFF: get_ifd() las nach dem Schließen nach -> 'seek of closed file' brach den Lauf ab."""
+    from PIL import Image as PILImage
+    from imgsortsearch import metadata
+    p = mache_bild(tmp_path / "a.jpg", "SM-A546B", "2024:03:12 10:15:00")
+    offen = {"ja": False}
+    echt_open, echt_get_ifd = PILImage.open, PILImage.Exif.get_ifd
+
+    class Wrapper:
+        def __init__(self, img):
+            self.img = img
+
+        def __enter__(self):
+            offen["ja"] = True
+            return self.img
+
+        def __exit__(self, *a):
+            offen["ja"] = False
+            self.img.close()
+
+    def get_ifd(self, tag):
+        if not offen["ja"]:
+            raise ValueError("seek of closed file")
+        return echt_get_ifd(self, tag)
+
+    monkeypatch.setattr(PILImage, "open", lambda f: Wrapper(echt_open(f)))
+    monkeypatch.setattr(PILImage.Exif, "get_ifd", get_ifd)
+    info = metadata.lies_metadaten([p], exiftool=False)[0]
+    assert info.datum == datetime(2024, 3, 12, 10, 15) and info.datum_quelle == "exif"
+
+
+def test_fehler_bei_einem_bild_bricht_metadaten_nicht_ab(tmp_path, monkeypatch):
+    from imgsortsearch import metadata
+    a = mache_bild(tmp_path / "IMG_20230105_081500.jpg")
+    b = mache_bild(tmp_path / "b.jpg", "iPhone 13", "2024:03:16 14:00:00")
+
+    def kaputt(info):
+        if info.pfad == a:
+            raise ValueError("seek of closed file")
+        return echt(info)
+    echt = metadata._aus_pillow
+    monkeypatch.setattr(metadata, "_aus_pillow", kaputt)
+    infos = metadata.lies_metadaten([a, b], exiftool=False)
+    assert infos[0].datum == datetime(2023, 1, 5, 8, 15) and infos[1].datum_quelle == "exif"

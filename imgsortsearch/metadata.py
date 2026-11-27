@@ -185,11 +185,16 @@ def _aus_pillow(info: BildInfo) -> None:
     except ImportError:
         return
     try:
+        # Alles lesen, solange die Datei offen ist: get_ifd() liest bei manchen Formaten
+        # (TIFF, einige JPEG/HEIC) erst beim Aufruf nach -> "seek of closed file".
         with Image.open(info.pfad) as img:
             info.breite, info.hoehe = img.size
-            exif = img.getexif()
+            _exif_auswerten(info, img.getexif())
     except Exception:
-        return
+        pass  # kaputte oder unlesbare EXIF-Daten: Datum kommt dann aus Dateiname/Dateidatum
+
+
+def _exif_auswerten(info: BildInfo, exif) -> None:
     if not exif:
         return
     info.hersteller = str(exif.get(271, "") or "").strip("\x00 ")
@@ -221,22 +226,33 @@ def lies_metadaten(pfade: list[Path], exiftool: bool | None = None) -> list[Bild
     roh = lies_mit_exiftool(pfade) if exiftool else {}
     ergebnis = []
     for p in pfade:
-        info = BildInfo(pfad=p)
         try:
-            st = p.stat()
-            info.groesse = st.st_size
-        except OSError:
-            st = None
-        d = roh.get(p) or roh.get(Path(str(p).replace("\\", "/")))
-        if d:
-            _aus_exiftool(info, d)
-        else:
-            _aus_pillow(info)
-        if not info.datum:
+            ergebnis.append(_eine_datei(p, roh))
+        except Exception:  # ein einzelnes Bild darf nie den ganzen Lauf abbrechen
+            info = BildInfo(pfad=p)
             dt = datum_aus_dateiname(p.name)
             if dt:
                 info.datum, info.datum_quelle = dt, "dateiname"
-        if not info.datum and st:
-            info.datum, info.datum_quelle = datetime.fromtimestamp(st.st_mtime), "dateidatum"
-        ergebnis.append(info)
+            ergebnis.append(info)
     return ergebnis
+
+
+def _eine_datei(p: Path, roh: dict) -> BildInfo:
+    info = BildInfo(pfad=p)
+    try:
+        st = p.stat()
+        info.groesse = st.st_size
+    except OSError:
+        st = None
+    d = roh.get(p) or roh.get(Path(str(p).replace("\\", "/")))
+    if d:
+        _aus_exiftool(info, d)
+    else:
+        _aus_pillow(info)
+    if not info.datum:
+        dt = datum_aus_dateiname(p.name)
+        if dt:
+            info.datum, info.datum_quelle = dt, "dateiname"
+    if not info.datum and st:
+        info.datum, info.datum_quelle = datetime.fromtimestamp(st.st_mtime), "dateidatum"
+    return info
