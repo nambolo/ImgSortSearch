@@ -354,3 +354,25 @@ def test_rueckgaengig_nach_zuruecksetzen_trifft_kein_fremdes_bild(client, zustan
     assert all(Path(p).exists() for p in nachher.values())
     for i, p in nachher.items():
         assert Path(p).name == Path(vorher[i]).name
+
+
+def test_namenssuche_findet_personen_in_jeder_suchart(client, zustand):
+    """Patrick: Namen erkannter Personen fanden nichts (z. B. wenn "Nach Bedeutung" eingestellt war
+    oder der Suchtext eines Bildes nicht aktuell war)."""
+    indizieren(client)
+    pid = client.get("/api/personen").json()["personen"][0]["id"]
+    client.post(f"/api/personen/{pid}/name", json={"name": "Jürgen Müller"})
+    erwartet = {"c.jpg", "d.jpg"}
+    with zustand.db.verbindung() as v:
+        v.execute("UPDATE bilder SET suchtext=''")  # veralteter Suchtext darf nicht schaden
+    for q in ("Jürgen", "jurgen", "JÜRGEN MÜLLER", "Jür", "muller"):
+        for art in ("beides", "text", "bedeutung"):
+            assert erwartet <= set(namen(client, q=q, art=art)), (q, art)
+    # Name + weiterer Begriff: nur Bilder der Person, die auch dazu passen
+    zustand.db.suchtext_aktualisieren_viele(r["id"] for r in zustand.db.abfrage("SELECT id FROM bilder"))
+    assert set(namen(client, q="Jürgen c.jpg", art="text")) == {"c.jpg"}
+    # nur der Name: genau seine Bilder, keine Beimischung aus der Bedeutungssuche oder aus Teilwörtern
+    with zustand.db.verbindung() as v:
+        v.execute("UPDATE bilder SET suchtext = suchtext || ' jurgensen' WHERE pfad LIKE '%a.jpg'")
+    for art in ("beides", "bedeutung", "text"):
+        assert set(namen(client, q="Jürgen", art=art)) == erwartet, art

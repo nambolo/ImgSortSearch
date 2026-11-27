@@ -256,8 +256,36 @@ function zeichneErgebnis() {
   }
   const m = $("#mehr-laden");
   if (m) m.onclick = () => suchen(true);
-  if (!S.bilder.length && S.modus === "raster") $("#raster").innerHTML = `<div class="mehr hinweis">Keine Bilder gefunden. ${S.gesamt === 0 && !$("#q").value ? "Lege unter Einstellungen einen Bilder-Ordner an und starte den Index." : ""}</div>`;
+  if (!S.bilder.length) {
+    // Keine Treffer: zeigen, welche Filter die Suche einschränken, und sie mit einem Klick entfernen
+    const filter = aktiveFilter();
+    const text = filter.length
+      ? `Keine Bilder gefunden. Aktive Filter: <b>${filter.map(esc).join(", ")}</b>. <button class="knopf leicht" id="filter-weg">Alle Filter entfernen</button>`
+      : `Keine Bilder gefunden. ${S.gesamt === 0 && !$("#q").value ? "Lege unter Einstellungen einen Bilder-Ordner an und starte den Index." : ""}`;
+    if (S.modus === "raster") $("#raster").innerHTML = `<div class="mehr hinweis">${text}</div>`;
+    else $("#detail").innerHTML = `<div class="leer">${text}</div>`;
+    const weg = $("#filter-weg");
+    if (weg) weg.onclick = filterEntfernen;
+  }
   auswahlLeiste();
+}
+
+const FILTER_FELDER = [["#f-kategorie", "Kategorie"], ["#f-thema", "Thema"], ["#f-jahr", "Jahr"], ["#f-kamera", "Kamera"], ["#f-ort", "Ort"]];
+function aktiveFilter() {
+  const erg = FILTER_FELDER.filter(([s]) => $(s) && $(s).value).map(([s, n]) => `${n}: ${$(s).selectedOptions[0]?.textContent || $(s).value}`);
+  if (S.person) erg.push(`Person: ${S.personName || "gewählt"}`);
+  if (S.aehnlich) erg.push("Ähnlich wie ein Bild");
+  if (S.bereich) erg.push("Kartenbereich");
+  if ($("#q").value.trim() && $("#art").value !== "beides") erg.push(`Suchart: ${$("#art").selectedOptions[0].textContent}`);
+  return erg;
+}
+function filterEntfernen() {
+  FILTER_FELDER.forEach(([s]) => { if ($(s)) $(s).value = ""; });
+  $("#art").value = "beides";
+  S.person = null; S.aehnlich = null;
+  $("#f-person-chip").hidden = true; $("#f-aehnlich-chip").hidden = true;
+  if (typeof bereichEntfernen === "function") bereichEntfernen();
+  suchen();
 }
 
 function groesseText(n) {
@@ -569,6 +597,7 @@ window.bereichFilter = (bereich, text, filter = {}) => {
 
 function personFilter(id, name) {
   S.person = id;
+  S.personName = name || "";
   const c = $("#f-person-chip");
   c.hidden = false;
   c.innerHTML = `Person: ${esc(name || "unbenannt")} <button title="Filter entfernen">✕</button>`;

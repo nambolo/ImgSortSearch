@@ -293,11 +293,29 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
             rang = _vektor_rang(blob_zu_vektor(r["clip"]), schwelle=0.0, max_n=1000)
         elif q.strip():
             rang = {}
-            if art in ("beides", "text"):
+            # Namen erkannter Personen: direkt über die Gesichter, egal welche Suchart eingestellt ist
+            # und auch dann, wenn der Suchtext eines Bildes (noch) nicht aktuell ist
+            pids, rest, exakt = personen.namen_treffer(z.db, q)
+            if pids:
+                bilder_p = personen.bilder_mit_personen(z.db, pids)
+                if rest and bilder_p:
+                    tb, tp = text_suche_bedingung(rest)
+                    teil = set()
+                    for i in range(0, len(bilder_p), 900):
+                        stueck = bilder_p[i:i + 900]
+                        teil |= {r["id"] for r in z.db.abfrage(
+                            f"SELECT id FROM bilder WHERE {tb} AND id IN ({','.join('?' * len(stueck))})", (*tp, *stueck))}
+                    bilder_p = list(teil)
+                for i in bilder_p:
+                    rang[i] = 3.0
+            # Nur ein Name gesucht: genau die Bilder dieser Person. Die Bedeutungssuche kennt keine Namen
+            # und würde sonst zufällige Bilder beimischen, die Textsuche Teilwörter ("Anna" in "Johanna").
+            nur_name = bool(pids) and exakt
+            if art in ("beides", "text") and not nur_name:
                 tb, tp = text_suche_bedingung(q)
                 for r in z.db.abfrage(f"SELECT id FROM bilder WHERE {tb}", tp):
                     rang[r["id"]] = 2.0  # Textbefunde zuerst
-            if art in ("beides", "bedeutung"):
+            if art in ("beides", "bedeutung") and not nur_name:
                 clip = z.m.clip()
                 if clip is not None:
                     qv = clip.texte([q.strip()])[0]
