@@ -305,20 +305,23 @@ class Indexer:
                         st = info.pfad.stat()
                     except OSError:  # inzwischen gelöscht oder Laufwerk weg
                         continue
-                    v.execute("""
-                        INSERT INTO bilder (pfad, groesse, mtime, datum, datum_quelle, hersteller, modell, kamera,
-                                            gps_lat, gps_lon, breite, hoehe, schlagwoerter)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-                        ON CONFLICT(pfad) DO UPDATE SET groesse=excluded.groesse, mtime=excluded.mtime,
-                          datum=excluded.datum, datum_quelle=excluded.datum_quelle, hersteller=excluded.hersteller,
-                          modell=excluded.modell, kamera=excluded.kamera, gps_lat=excluded.gps_lat,
-                          gps_lon=excluded.gps_lon, breite=excluded.breite, hoehe=excluded.hoehe,
-                          schlagwoerter=excluded.schlagwoerter, clip=NULL, schritt_clip=0, schritt_ocr=0,
-                          schritt_gesichter=0, schritt_beschreibung=0, fehler=NULL""",
-                              (str(info.pfad), st.st_size, st.st_mtime,
-                               info.datum.isoformat(sep=" ") if info.datum else None, info.datum_quelle,
-                               info.hersteller, info.modell, info.kamera, info.gps_lat, info.gps_lon,
-                               info.breite, info.hoehe, ", ".join(info.schlagwoerter)))
+                    try:
+                        v.execute("""
+                            INSERT INTO bilder (pfad, groesse, mtime, datum, datum_quelle, hersteller, modell, kamera,
+                                                gps_lat, gps_lon, breite, hoehe, schlagwoerter)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            ON CONFLICT(pfad) DO UPDATE SET groesse=excluded.groesse, mtime=excluded.mtime,
+                              datum=excluded.datum, datum_quelle=excluded.datum_quelle, hersteller=excluded.hersteller,
+                              modell=excluded.modell, kamera=excluded.kamera, gps_lat=excluded.gps_lat,
+                              gps_lon=excluded.gps_lon, breite=excluded.breite, hoehe=excluded.hoehe,
+                              schlagwoerter=excluded.schlagwoerter, clip=NULL, schritt_clip=0, schritt_ocr=0,
+                              schritt_gesichter=0, schritt_beschreibung=0, fehler=NULL""",
+                                  (str(info.pfad), st.st_size, st.st_mtime,
+                                   info.datum.isoformat(sep=" ") if info.datum else None, info.datum_quelle,
+                                   info.hersteller, info.modell, info.kamera, info.gps_lat, info.gps_lon,
+                                   info.breite, info.hoehe, ", ".join(info.schlagwoerter)))
+                    except Exception as ex:  # ein Bild mit seltsamen Metadaten bricht nicht den Lauf ab
+                        self._fehler(f"Metadaten {info.pfad.name}: {ex}")
             # Suchtext (Dateiname, Ordner, Kamera) gleich anlegen: so findet die Suche neue Bilder schon
             # während der Analyse läuft, und auch Dateien, die sich nicht analysieren lassen
             pfade = [str(p) for p in teil]
