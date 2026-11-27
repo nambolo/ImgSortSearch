@@ -90,8 +90,12 @@ class Einstellungen:
         if self.datei.exists():
             try:
                 self.werte = _mische(STANDARD, json.loads(self.datei.read_text("utf-8-sig")))
-            except json.JSONDecodeError:
-                pass
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                # beschädigte Datei sichern, sonst wäre sie beim nächsten Speichern weg
+                try:
+                    self.datei.replace(self.datei.with_name(self.datei.name + ".defekt"))
+                except OSError:
+                    pass
 
     def __getitem__(self, k):
         return self.werte[k]
