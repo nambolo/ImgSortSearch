@@ -19,7 +19,7 @@ from .datenbank import Datenbank
 from .einstellungen import Einstellungen, daten_ordner
 from .indexer import Indexer, Modelle, alle_neu_einordnen, bilder_entfernen, bilder_im_ordner, lade_themen, \
     text_suche_bedingung, vorschau_erzeugen, vorschau_pfad
-from .klassifizierung import UNKLAR
+from .klassifizierung import UNKLAR, haupt_kategorien, zusatz_kategorien
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).with_name("static")
@@ -63,9 +63,13 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
             raise HTTPException(404, "Bild nicht gefunden")
         return r
 
+    def zusatz_liste(r) -> list[str]:
+        return [k for k in (r["zusatz"] or "").split(",") if k]
+
     def kurz(r) -> dict:
         return {"id": r["id"], "pfad": r["pfad"], "name": Path(r["pfad"]).name, "datum": r["datum"],
                 "kategorie": r["kategorie"], "manuell": r["kategorie_manuell"] is not None,
+                "zusatz": zusatz_liste(r),
                 "sicherheit": r["sicherheit"], "tags": r["tags"] or "", "beschreibung": r["beschreibung"] or "",
                 "kamera": r["kamera"], "gesichter": r["anzahl_gesichter"] or 0}
 
@@ -74,8 +78,11 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
     @app.get("/api/status")
     def status():
         zahlen = {r["k"]: r["n"] for r in z.db.abfrage(f"SELECT {KAT} AS k, COUNT(*) AS n FROM bilder GROUP BY k")}
+        gesamt = sum(zahlen.values())
+        for k in zusatz_kategorien(z.e.werte):  # Zusatzkategorien zählen extra, ein Bild kann in mehreren sein
+            zahlen[k] = z.db.eins("SELECT COUNT(*) AS n FROM bilder WHERE instr(zusatz, ?) > 0", (f",{k},",))["n"]
         offen = z.db.eins("SELECT COUNT(*) AS n FROM bilder WHERE schritt_clip=0 AND fehler IS NULL")["n"]
-        return {"index": z.indexer.status, "kategorien": zahlen, "gesamt": sum(zahlen.values()),
+        return {"index": z.indexer.status, "kategorien": zahlen, "gesamt": gesamt,
                 "offen": offen, "modell_fehler": z.m.fehler, "geraete": z.m.geraete(), "exiftool": shutil.which("exiftool") is not None,
                 "sortieren": z.sortier_status,
                 "quellen_fehlen": [q for q in z.e["quellen"] if not Path(q).is_dir()]}
@@ -88,6 +95,15 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
     def einstellungen_schreiben(neu: dict = Body(...)):
         alt_beschl = z.e.get("beschleunigung")
         werte = z.e.aktualisieren(neu)
+        if "kategorien" in neu:
+            # Wurde eine Kategorie zur Zusatzkategorie, werden von Hand gesetzte Zuordnungen mitgenommen
+            zusatz = zusatz_kategorien(werte)
+            for k in zusatz:
+                ids = [r["id"] for r in z.db.abfrage("SELECT id FROM bilder WHERE kategorie_manuell=?", (k,))]
+                if ids:
+                    with z.db.verbindung() as v:
+                        v.execute("UPDATE bilder SET kategorie_manuell=NULL WHERE kategorie_manuell=?", (k,))
+                    z.db.zusatz_setzen(ids, k, True, zusatz)
         if werte.get("beschleunigung") != alt_beschl and not z.indexer.status["laeuft"]:
             z.m.entladen()  # beim nächsten Gebrauch auf dem neuen Gerät laden
         if any(k in neu for k in ("kategorien", "arbeitszeit", "inhalt", "schwelle", "regeln", "themen")):
@@ -168,17 +184,33 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
             "SELECT DISTINCT substr(datum,1,4) AS j FROM bilder WHERE datum IS NOT NULL ORDER BY j DESC")]
         kameras = [r["kamera"] for r in z.db.abfrage(
             "SELECT kamera, COUNT(*) n FROM bilder GROUP BY kamera ORDER BY n DESC LIMIT 50")]
+        # Themen, die bei mindestens einem Bild unter den erkannten Themen sind, mit Anzahl
+        zaehler: dict[str, int] = {}
+        for r in z.db.abfrage("SELECT tags FROM bilder WHERE tags IS NOT NULL AND tags != ''"):
+            for t in r["tags"].split(","):
+                t = t.strip()
+                if t:
+                    zaehler[t] = zaehler.get(t, 0) + 1
+        reihenfolge = [t["name"] for t in z.e["themen"]]
+        themen = sorted(zaehler, key=lambda t: (reihenfolge.index(t) if t in reihenfolge else len(reihenfolge), t))
         return {"jahre": jahre, "kameras": kameras,
-                "kategorien": [k["name"] for k in z.e["kategorien"]] + [UNKLAR]}
+                "themen": [{"name": t, "anzahl": zaehler[t]} for t in themen],
+                "kategorien": haupt_kategorien(z.e.werte) + [UNKLAR] + zusatz_kategorien(z.e.werte)}
 
     @app.get("/api/bilder")
-    def bilder(q: str = "", kategorie: str = "", jahr: str = "", kamera: str = "", person: int = 0,
+    def bilder(q: str = "", kategorie: str = "", jahr: str = "", kamera: str = "", person: int = 0, thema: str = "",
                aehnlich_zu: int = 0, nur_manuell: bool = False, sortierung: str = "datum_ab",
                offset: int = 0, limit: int = 200, art: str = "beides"):
         bed, par = ["1=1"], []
-        if kategorie:
+        if kategorie and kategorie in zusatz_kategorien(z.e.werte):
+            bed.append("instr(zusatz, ?) > 0")
+            par.append(f",{kategorie},")
+        elif kategorie:
             bed.append(f"{KAT}=?")
             par.append(kategorie)
+        if thema:  # eines der erkannten Themen des Bildes (Spalte tags: "Whiteboard, Technik")
+            bed.append("instr(', ' || tags || ',', ?) > 0")
+            par.append(f", {thema},")
         if jahr:
             bed.append("substr(datum,1,4)=?")
             par.append(jahr)
@@ -259,6 +291,9 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
         r = bild_oder_404(bild_id)
         d = {k: r[k] for k in r.keys() if k not in ("clip", "suchtext")}
         d["name"] = Path(r["pfad"]).name
+        d["zusatz"] = zusatz_liste(r)
+        d["zusatz_hand"] = {h["kategorie"]: bool(h["an"]) for h in z.db.abfrage(
+            "SELECT kategorie, an FROM bild_zusatz WHERE bild_id=?", (bild_id,))}
         d["gesichter"] = [dict(g) for g in z.db.abfrage(
             "SELECT g.id, g.x, g.y, g.w, g.h, g.person_id, p.name FROM gesichter g "
             "LEFT JOIN personen p ON p.id=g.person_id WHERE g.bild_id=?", (bild_id,))]
@@ -305,10 +340,38 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
             ausschnitt.save(cache, "JPEG", quality=85)
         return FileResponse(cache, media_type="image/jpeg")
 
+    @app.post("/api/bilder/zusatz")
+    def zusatz_setzen(daten: dict = Body(...)):
+        """Zusatzkategorie für mehrere Bilder: an=true hinzufügen, false entfernen, null wieder automatisch."""
+        ids = [int(i) for i in daten.get("ids", [])]
+        kat = daten.get("kategorie") or ""
+        gueltig = zusatz_kategorien(z.e.werte)
+        if kat not in gueltig:
+            raise HTTPException(400, f"„{kat}“ ist keine Zusatzkategorie")
+        an = daten.get("an")
+        z.db.zusatz_setzen(ids, kat, None if an is None else bool(an), gueltig)
+        return {"geaendert": len(ids)}
+
+    @app.post("/api/bilder/neu-analysieren")
+    def neu_analysieren(daten: dict = Body(...)):
+        """Markierte Bilder komplett neu analysieren (Bildinhalt, Gesichter, Text, Beschreibung).
+        Von Hand gesetzte Kategorien bleiben erhalten."""
+        ids = [int(i) for i in daten.get("ids", [])]
+        if not ids:
+            raise HTTPException(400, "Keine Bilder ausgewählt")
+        with z.db.verbindung() as v:
+            v.executemany("UPDATE bilder SET schritt_clip=0, schritt_ocr=0, schritt_gesichter=0, "
+                          "schritt_beschreibung=0, fehler=NULL WHERE id=?", [(i,) for i in ids])
+        gestartet = z.indexer.starten()
+        return {"vorgemerkt": len(ids), "gestartet": gestartet}
+
     @app.post("/api/bilder/kategorie")
     def kategorie_setzen(daten: dict = Body(...)):
         ids = [int(i) for i in daten.get("ids", [])]
         kat = daten.get("kategorie") or None  # None = wieder automatisch
+        if kat in zusatz_kategorien(z.e.werte):  # Zusatzkategorie: hinzufügen statt ersetzen
+            z.db.zusatz_setzen(ids, kat, True, zusatz_kategorien(z.e.werte))
+            return {"geaendert": len(ids)}
         with z.db.verbindung() as v:
             v.executemany("UPDATE bilder SET kategorie_manuell=? WHERE id=?", [(kat, i) for i in ids])
         return {"geaendert": len(ids)}
@@ -414,21 +477,23 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
     # ------------------------------------------------------------ Sortieren
 
     def _auftraege(nur: list[str] | None) -> list[sortieren.Auftrag]:
-        zeilen = z.db.abfrage(f"SELECT id, pfad, datum, kamera, tags, beschreibung, {KAT} AS kategorie FROM bilder")
+        zeilen = z.db.abfrage(f"SELECT id, pfad, datum, kamera, tags, beschreibung, zusatz, {KAT} AS kategorie "
+                              "FROM bilder")
         namen = {}
         for r in z.db.abfrage("SELECT g.bild_id, p.name FROM gesichter g JOIN personen p ON p.id=g.person_id "
                               "WHERE p.name IS NOT NULL"):
             namen.setdefault(r["bild_id"], []).append(r["name"])
         erg = []
         for r in zeilen:
-            if nur and r["kategorie"] not in nur:
+            zusatz = zusatz_liste(r)
+            if nur and r["kategorie"] not in nur and not set(zusatz) & set(nur):
                 continue
             erg.append(sortieren.Auftrag(
                 pfad=Path(r["pfad"]), kategorie=r["kategorie"],
                 datum=datetime.fromisoformat(r["datum"]) if r["datum"] else None, kamera=r["kamera"] or "",
                 tags=[t.strip() for t in (r["tags"] or "").split(",") if t.strip()],
                 personen=sorted(set(namen.get(r["id"], []))), beschreibung=r["beschreibung"] or "",
-                bild_id=r["id"]))
+                bild_id=r["id"], zusatz=zusatz))
         return erg
 
     @app.post("/api/sortieren/vorschau")

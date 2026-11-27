@@ -10,7 +10,7 @@ import json
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -29,6 +29,7 @@ class Auftrag:
     personen: list[str]
     beschreibung: str = ""
     bild_id: int | None = None
+    zusatz: list[str] = field(default_factory=list)  # Zusatzkategorien (z. B. Natur, Familie)
 
 
 class _Datum:
@@ -91,12 +92,13 @@ def _freier_pfad(ziel: Path, quelle: Path, belegt: set) -> tuple[Path, bool]:
 
 
 def alle_tags(a: Auftrag) -> list[str]:
-    return list(dict.fromkeys([a.kategorie] + a.tags + a.personen))
+    return list(dict.fromkeys([a.kategorie] + a.zusatz + a.tags + a.personen))
 
 
 def xmp_sidecar(a: Auftrag) -> str:
     bag = "".join(f"<rdf:li>{escape(t)}</rdf:li>" for t in alle_tags(a))
-    hier = [f"ImgSortSearch|Kategorie|{a.kategorie}"] + [f"ImgSortSearch|Thema|{t}" for t in a.tags] \
+    hier = [f"ImgSortSearch|Kategorie|{k}" for k in [a.kategorie] + a.zusatz] \
+        + [f"ImgSortSearch|Thema|{t}" for t in a.tags] \
         + [f"Personen|{p}" for p in a.personen]
     hier_xml = "".join(f"<rdf:li>{escape(x)}</rdf:li>" for x in hier)
     beschr = (f'<dc:description><rdf:Alt><rdf:li xml:lang="x-default">{escape(a.beschreibung)}'
@@ -123,7 +125,7 @@ def _einbetten_argumente(datei: Path, a: Auftrag, sicherung: bool) -> list[str]:
     # erst entfernen, dann hinzufügen: so entstehen bei einem zweiten Lauf keine doppelten Einträge
     for t in alle_tags(a):
         args += [f"-XMP-dc:Subject-={t}", f"-XMP-dc:Subject+={t}", f"-IPTC:Keywords-={t}", f"-IPTC:Keywords+={t}"]
-    hier = [f"ImgSortSearch|Kategorie|{a.kategorie}"] + [f"Personen|{p}" for p in a.personen]
+    hier = [f"ImgSortSearch|Kategorie|{k}" for k in [a.kategorie] + a.zusatz] + [f"Personen|{p}" for p in a.personen]
     for h in hier:
         args += [f"-XMP-lr:HierarchicalSubject-={h}", f"-XMP-lr:HierarchicalSubject+={h}"]
     if a.beschreibung:
