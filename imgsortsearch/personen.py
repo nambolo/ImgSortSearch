@@ -9,17 +9,25 @@ from .datenbank import Datenbank, blob_zu_vektor
 SUCH_SCHWELLE = 0.36
 
 
-def _zentren(db: Datenbank) -> tuple[list[int], np.ndarray]:
-    zeilen = db.abfrage("SELECT person_id, vektor FROM gesichter WHERE person_id IS NOT NULL")
+def _summen(db: Datenbank) -> dict[int, np.ndarray]:
+    """Summe der Gesichtsvektoren je Person (nicht normiert, damit neue Gesichter richtig gewichtet werden)."""
     summen: dict[int, np.ndarray] = {}
-    for z in zeilen:
+    for z in db.abfrage("SELECT person_id, vektor FROM gesichter WHERE person_id IS NOT NULL"):
         v = blob_zu_vektor(z["vektor"])
         summen[z["person_id"]] = summen.get(z["person_id"], 0) + v
+    return summen
+
+
+def _zentren(db: Datenbank) -> tuple[list[int], np.ndarray]:
+    summen = _summen(db)
     if not summen:
         return [], np.zeros((0, 128), dtype=np.float32)
     ids = list(summen)
-    mat = np.stack([summen[i] / (np.linalg.norm(summen[i]) + 1e-9) for i in ids])
-    return ids, mat
+    return ids, np.stack([_norm(summen[i]) for i in ids])
+
+
+def _norm(v: np.ndarray) -> np.ndarray:
+    return v / (np.linalg.norm(v) + 1e-9)
 
 
 def neue_gesichter_zuordnen(db: Datenbank, schwelle: float = 0.40, min_score: float = 0.9) -> int:
@@ -28,11 +36,13 @@ def neue_gesichter_zuordnen(db: Datenbank, schwelle: float = 0.40, min_score: fl
     Einfaches, schrittweises Verfahren: ausreichend für einige zehntausend Gesichter.
     Nur gut erkannte Gesichter (score) bilden neue Gruppen, damit nicht jede
     unscharfe Hintergrundperson eine eigene Gruppe wird."""
-    offen = db.abfrage("SELECT id, vektor, score FROM gesichter WHERE person_id IS NULL ORDER BY score DESC")
+    offen = db.abfrage("SELECT id, bild_id, vektor, score FROM gesichter WHERE person_id IS NULL "
+                       "ORDER BY score DESC")
     if not offen:
         return 0
-    ids, mat = _zentren(db)
-    summen = {pid: mat[i].copy() for i, pid in enumerate(ids)}
+    summen = _summen(db)
+    ids = list(summen)
+    mat = np.stack([_norm(summen[i]) for i in ids]) if ids else np.zeros((0, 128), dtype=np.float32)
     zuordnung = []
     for g in offen:
         v = blob_zu_vektor(g["vektor"])
@@ -43,7 +53,7 @@ def neue_gesichter_zuordnen(db: Datenbank, schwelle: float = 0.40, min_score: fl
                 pid = ids[j]
                 zuordnung.append((pid, g["id"]))
                 summen[pid] = summen[pid] + v
-                mat[j] = summen[pid] / (np.linalg.norm(summen[pid]) + 1e-9)
+                mat[j] = _norm(summen[pid])
                 continue
         if (g["score"] or 0) < min_score:
             continue
@@ -51,11 +61,23 @@ def neue_gesichter_zuordnen(db: Datenbank, schwelle: float = 0.40, min_score: fl
             pid = con.execute("INSERT INTO personen (name) VALUES (NULL)").lastrowid
         ids.append(pid)
         summen[pid] = v.copy()
-        mat = np.vstack([mat, v[None, :]]) if len(mat) else v[None, :].copy()
+        mat = np.vstack([mat, _norm(v)[None, :]]) if len(mat) else _norm(v)[None, :]
         zuordnung.append((pid, g["id"]))
     with db.verbindung() as con:
         con.executemany("UPDATE gesichter SET person_id=? WHERE id=?", zuordnung)
+    # benannte Personen sollen sofort über die Textsuche gefunden werden
+    gesicht_bild = {g["id"]: g["bild_id"] for g in offen}
+    db.suchtext_aktualisieren_viele(gesicht_bild[gid] for _, gid in zuordnung)
     return len(zuordnung)
+
+
+def _bilder_von(db: Datenbank, person_ids) -> list[int]:
+    person_ids = list(person_ids)
+    if not person_ids:
+        return []
+    return [z["bild_id"] for z in db.abfrage(
+        f"SELECT DISTINCT bild_id FROM gesichter WHERE person_id IN ({','.join('?' * len(person_ids))})",
+        person_ids)]
 
 
 def personen_liste(db: Datenbank, min_anzahl: int = 2) -> list[dict]:
@@ -91,13 +113,18 @@ def zusammenfuehren(db: Datenbank, ziel_id: int, quell_ids: list[int]) -> None:
             if q != ziel_id:
                 con.execute("UPDATE gesichter SET person_id=? WHERE person_id=?", (ziel_id, q))
                 con.execute("DELETE FROM personen WHERE id=?", (q,))
+    db.suchtext_aktualisieren_viele(_bilder_von(db, [ziel_id]))  # Name gilt jetzt auch für diese Bilder
 
 
 def gesicht_entfernen(db: Datenbank, gesicht_id: int) -> None:
     """Gesicht passt nicht zur Person: in eine eigene Gruppe verschieben."""
+    r = db.eins("SELECT bild_id FROM gesichter WHERE id=?", (gesicht_id,))
+    if not r:
+        return
     with db.verbindung() as con:
         pid = con.execute("INSERT INTO personen (name) VALUES (NULL)").lastrowid
         con.execute("UPDATE gesichter SET person_id=?, person_fest=1 WHERE id=?", (pid, gesicht_id))
+    db.suchtext_aktualisieren(r["bild_id"])  # alter Name passt nicht mehr
 
 
 def aehnliche_gesichter(db: Datenbank, referenz: np.ndarray, schwelle: float = SUCH_SCHWELLE,

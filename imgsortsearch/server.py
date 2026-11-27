@@ -454,11 +454,21 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
         return {"gestartet": True}
 
     def _pfade_aktualisieren(aenderungen):
+        geaendert = []
         with z.db.verbindung() as v:
             for bild_id, pfad in aenderungen:
-                if bild_id:
+                if not bild_id:
+                    continue
+                try:
                     st = Path(pfad).stat()
-                    v.execute("UPDATE bilder SET pfad=?, mtime=? WHERE id=?", (pfad, st.st_mtime, bild_id))
+                except OSError:  # Datei inzwischen weg: der nächste Indexlauf räumt auf
+                    continue
+                # Größe mitführen (eingebettete Tags ändern sie), sonst gilt das Bild als geändert
+                # und wird beim nächsten Lauf komplett neu analysiert
+                v.execute("UPDATE OR IGNORE bilder SET pfad=?, mtime=?, groesse=? WHERE id=?",
+                          (pfad, st.st_mtime, st.st_size, bild_id))
+                geaendert.append(bild_id)
+        z.db.suchtext_aktualisieren_viele(geaendert)  # neuer Dateiname soll gefunden werden
 
     @app.get("/api/protokolle")
     def protokolle():

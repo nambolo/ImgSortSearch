@@ -59,6 +59,20 @@ def lade_datei(urls: list[str], ziel: Path) -> Path:
 RAW_ENDUNGEN = {".dng", ".cr2", ".cr3", ".nef", ".arw", ".orf", ".rw2", ".raf"}
 
 
+def _als_rgb(img: Image.Image) -> Image.Image:
+    """RGB ohne Überraschungen: Transparenz auf Weiß (sonst schwarzer Text auf schwarzem Grund
+    bei PNG-Screenshots), 16-Bit-Graustufen (TIFF/PNG) richtig skaliert statt fast weiß."""
+    if img.mode in ("I;16", "I;16L", "I;16B", "I;16N", "I", "F"):
+        arr = np.asarray(img, dtype=np.float32)
+        hoch = float(arr.max()) or 1.0
+        return Image.fromarray((arr / hoch * 255).clip(0, 255).astype(np.uint8), "L").convert("RGB")
+    if img.mode in ("RGBA", "LA", "PA") or (img.mode == "P" and "transparency" in img.info):
+        rgba = img.convert("RGBA")
+        weiss = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        return Image.alpha_composite(weiss, rgba).convert("RGB")
+    return img.convert("RGB")
+
+
 def bild_laden(pfad: Path, max_kante: int | None = None) -> Image.Image:
     """Öffnet ein Bild (auch HEIC, RAW über die eingebettete Vorschau), richtig gedreht, RGB."""
     pfad = Path(pfad)
@@ -76,8 +90,11 @@ def bild_laden(pfad: Path, max_kante: int | None = None) -> Image.Image:
         if not exiftool:
             raise ValueError(f"Bildformat wird nicht unterstützt: {pfad.name}")
         for tag in ("-JpgFromRaw", "-PreviewImage", "-ThumbnailImage"):
-            daten = subprocess.run([exiftool, "-b", tag, str(pfad)], capture_output=True,
-                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+            try:
+                daten = subprocess.run([exiftool, "-b", tag, str(pfad)], capture_output=True, timeout=60,
+                                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+            except subprocess.TimeoutExpired:
+                daten = b""  # hängende Datei darf den Indexlauf nicht blockieren
             if daten:
                 img = Image.open(io.BytesIO(daten))
                 img.load()
@@ -86,7 +103,7 @@ def bild_laden(pfad: Path, max_kante: int | None = None) -> Image.Image:
             raise ValueError(f"Keine Vorschau in {pfad.name}")
     img = ImageOps.exif_transpose(img)
     if img.mode != "RGB":
-        img = img.convert("RGB")
+        img = _als_rgb(img)
     if max_kante:
         img.thumbnail((max_kante, max_kante))
     return img
@@ -125,6 +142,7 @@ class _GeraetMitRueckfall:
     geraet = "cpu"
     geraet_name = "CPU (Prozessor)"
     _modelle: tuple = ()
+    _rechen_lock = threading.RLock()  # wird je Modell in __init__ ersetzt
 
     def _auf_cpu(self, fehler: Exception):
         log.warning("Grafikkarte (%s) fehlgeschlagen, weiter auf der CPU: %s", self.geraet_name, fehler)
@@ -136,13 +154,17 @@ class _GeraetMitRueckfall:
         self.geraet_name = f"CPU (Grafikkarte fehlgeschlagen: {str(fehler)[:120]})"
 
     def _mit_rueckfall(self, funktion):
-        try:
-            return funktion()
-        except (RuntimeError, NotImplementedError) as e:
-            if str(self.geraet) == "cpu":
-                raise
-            self._auf_cpu(e)
-            return funktion()
+        # Indexlauf und Suche nutzen dasselbe Modell aus verschiedenen Threads. DirectML/CUDA
+        # sind dafür nicht ausgelegt, und der Wechsel auf die CPU darf nicht mitten in einer
+        # anderen Berechnung passieren.
+        with self._rechen_lock:
+            try:
+                return funktion()
+            except (RuntimeError, NotImplementedError) as e:
+                if str(self.geraet) == "cpu":
+                    raise
+                self._auf_cpu(e)
+                return funktion()
 
 
 # ------------------------------------------------------------------ CLIP
@@ -166,6 +188,7 @@ class ClipModell(_GeraetMitRueckfall):
         import open_clip
         import torch
         self.torch = torch
+        self._rechen_lock = threading.RLock()
         torch.set_num_threads(max(1, (os.cpu_count() or 2) - 1))
         self.geraet, self.geraet_name = waehle_geraet(beschleunigung)
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
@@ -342,6 +365,7 @@ class Beschreiber(_GeraetMitRueckfall):
         import torch
         from transformers import BlipForConditionalGeneration, BlipProcessor
         self.torch = torch
+        self._rechen_lock = threading.RLock()
         self.geraet, self.geraet_name = waehle_geraet(beschleunigung)
         cache = str(modell_ordner() / "hf")
         self.proc = BlipProcessor.from_pretrained(modell, cache_dir=cache)
