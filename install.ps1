@@ -197,6 +197,18 @@ if ($Beschleunigung -eq "directml") {
 & $uv pip install --python $Py -r (Join-Path $Root "requirements.txt") -c $constraints @torchIndex @onnx
 Pruefe "Paketinstallation"
 
+# Download-Zwischenspeicher leeren: die Pakete sind in die Umgebung kopiert (UV_LINK_MODE=copy),
+# im Zwischenspeicher laegen sie sonst ein zweites Mal (mehrere GB). Bei einem Update werden nur
+# neue oder geaenderte Pakete erneut geladen.
+try {
+    & $uv cache clean 2>$null | Out-Null
+    $pipCache = Join-Path $Umg "cache\pip"
+    if (Test-Path $pipCache) { Remove-Item -Recurse -Force $pipCache -ErrorAction SilentlyContinue }
+    Write-Host "Download-Zwischenspeicher geleert."
+} catch {
+    Write-Warning "Download-Zwischenspeicher konnte nicht geleert werden ($_). Das Programm laeuft trotzdem."
+}
+
 Schritt "5/6  exiftool laden"
 $exDir = Join-Path $Umg "exiftool"
 if (-not (Test-Path (Join-Path $exDir "exiftool.exe"))) {

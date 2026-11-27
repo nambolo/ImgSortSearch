@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from . import dubletten, modelle, orte, papierkorb, personen, sortieren, zwischenablage
+from . import dubletten, modellpflege, modelle, orte, papierkorb, personen, sortieren, zwischenablage
 from .datenbank import Datenbank
 from .einstellungen import Einstellungen, daten_ordner
 from .indexer import Indexer, Modelle, alle_neu_einordnen, bilder_entfernen, bilder_im_ordner, lade_themen, \
@@ -539,6 +539,35 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
     def ausfuehrlich_download():
         a = z.e["beschreibung"]["ausfuehrlich"]
         return {"gestartet": z.m.download.starten(a["modell"]), "ausfuehrlich": z.ausfuehrlich_info()}
+
+    # ------------------------------------------------------------ Modelle verwalten
+
+    def modell_sperre() -> str:
+        if z.indexer.status["laeuft"] or z.dubletten.status.get("laeuft"):
+            return "Während der Index erstellt wird, können keine Modelle gelöscht werden. Bitte erst anhalten."
+        return ""
+
+    @app.get("/api/modelle")
+    def modelle_liste():
+        """Heruntergeladene Modelle mit Größe und ob sie nach den gespeicherten Einstellungen gebraucht werden."""
+        liste = modellpflege.bestand(z.e.werte, z.m.download.status)
+        return {"modelle": liste, "gesamt": sum(m["groesse"] for m in liste),
+                "frei": sum(m["groesse"] for m in liste if not m["gebraucht"]), "gesperrt": modell_sperre()}
+
+    @app.post("/api/modelle/entfernen")
+    def modelle_entfernen(daten: dict = Body(...)):
+        """Ungenutzte Modelle löschen. Gebrauchte werden nie gelöscht; eine wieder eingeschaltete Funktion
+        lädt ihr Modell beim nächsten Gebrauch neu herunter."""
+        if daten.get("bestaetigt") is not True:
+            raise HTTPException(400, "Bitte bestätigen.")
+        ids = [str(i) for i in daten.get("ids") or []]
+        if not ids:
+            raise HTTPException(400, "Keine Modelle ausgewählt.")
+        with z.indexer._start_lock:  # währenddessen keinen Indexlauf starten
+            if sperre := modell_sperre():
+                raise HTTPException(409, sperre)
+            erg = modellpflege.entfernen(ids, z.e.werte, z.m.download.status, z.m.entladen)
+        return erg
 
     @app.post("/api/ausfuehrlich/abbrechen")
     def ausfuehrlich_abbrechen():

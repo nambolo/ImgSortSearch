@@ -314,3 +314,13 @@ main { min-width: 0; min-height: 0; position: relative; }
 .pv-gesichter { display: flex; gap: 6px; overflow: hidden; height: 64px; }
 .pv-gesichter img { width: 64px; height: 64px; border-radius: 8px; object-fit: cover; flex: none; }
 .pv-kandidat.im-vergleich img { outline: 3px solid var(--akzent2); outline-offset: 1px; }
+
+/* Modelle und Speicherplatz (Einstellungen) */
+.modelle { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.modell { display: flex; align-items: center; gap: 10px; background: var(--bg2); border: 1px solid var(--linie); padding: 8px 10px; border-radius: 9px; }
+.modell.ungenutzt { cursor: pointer; }
+.modell-punkt { width: 16px; text-align: center; color: var(--text3); }
+.modell-name { flex: 1; display: flex; flex-direction: column; min-width: 0; word-break: break-word; }
+.modell-name small { color: var(--text3); font-size: 12px; }
+.modell-groesse { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.modelle-summe { margin-top: 2px; }

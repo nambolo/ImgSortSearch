@@ -338,6 +338,7 @@ function filterEntfernen() {
 function groesseText(n) {
   n = n || 0;
   if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024)).toLocaleString("de")} KB`;
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toLocaleString("de", { maximumFractionDigits: 1 })} GB`;
   return `${(n / 1048576).toLocaleString("de", { maximumFractionDigits: 1 })} MB`;
 }
 
@@ -1332,11 +1333,12 @@ function einstStand() {
 }
 // Bilder-Ordner und ausführliche Beschreibungen werden sofort gespeichert, alles andere mit „Speichern“
 ["input", "change"].forEach((art) => $("#ansicht-einstellungen").addEventListener(art, (ev) => {
-  if (ev.target.closest(".quellen, #e-quelle-neu, #e-lang, #e-lang-box")) return;
+  if (ev.target.closest(".quellen, #e-quelle-neu, #e-lang, #e-lang-box, #e-modelle")) return;
   einstGeaendert = true;
   einstStand();
 }));
 function ladeEinstellungen() {
+  modelleZeigen();
   if (einstGeaendert) { zeichneQuellen(); kartenSpeicher(); return; }
   const e = S.einst;
   quellen = [...e.quellen];
@@ -1391,6 +1393,54 @@ $("#e-index-zuruecksetzen").onclick = async () => {
     toast(`Index zurückgesetzt (${r.entfernt.toLocaleString("de")} Bilder entfernt).`);
     location.reload();
   } catch (e) { toast(e.message, true); }
+};
+// Heruntergeladene Modelle: Größe und ob sie gebraucht werden (nach den gespeicherten Einstellungen)
+let modellListe = null;
+async function modelleZeigen() {
+  try { modellListe = await api("/api/modelle"); } catch { $("#e-modelle").innerHTML = ""; return; }
+  const m = [...modellListe.modelle].sort((a, b) => a.gebraucht - b.gebraucht);  // ungenutzte oben
+  const frei = m.filter((x) => !x.gebraucht);
+  const zeile = (x) => `<label class="modell ${x.gebraucht ? "" : "ungenutzt"}">
+      ${x.gebraucht ? `<span class="modell-punkt" title="wird gebraucht">✓</span>` : `<input type="checkbox" data-id="${esc(x.id)}" checked>`}
+      <span class="modell-name"><b>${esc(x.name)}</b><small>${esc(x.grund)}</small></span>
+      <span class="modell-groesse">${groesseText(x.groesse)}</span></label>`;
+  $("#e-modelle").innerHTML = !m.length ? `<div class="hinweis">Noch keine Modelle heruntergeladen.</div>` :
+    m.map(zeile).join("") +
+    `<div class="hinweis modelle-summe">Zusammen ${groesseText(modellListe.gesamt)}` +
+    (frei.length ? `, davon <b>${groesseText(modellListe.frei)}</b> ungenutzt.` : `. Alle Modelle werden gebraucht.`) +
+    (einstGeaendert ? ` Die Liste richtet sich nach den gespeicherten Einstellungen: bitte erst speichern.` : "") + `</div>`;
+  $("#e-modelle-entfernen").hidden = !frei.length;
+  $$("#e-modelle input").forEach((i) => i.onchange = modelleKnopf);
+  modelleKnopf();
+}
+function modelleAuswahl() {
+  const ids = new Set($$("#e-modelle input:checked").map((i) => i.dataset.id));
+  return (modellListe ? modellListe.modelle : []).filter((x) => !x.gebraucht && ids.has(x.id));
+}
+function modelleKnopf() {
+  const w = modelleAuswahl();
+  const summe = w.reduce((s, x) => s + x.groesse, 0);
+  $("#e-modelle-entfernen").disabled = !w.length;
+  $("#e-modelle-entfernen").textContent = w.length ? `Ungenutzte Modelle entfernen (${groesseText(summe)}) …` : "Ungenutzte Modelle entfernen …";
+}
+$("#e-modelle-entfernen").onclick = async () => {
+  if (einstGeaendert) { toast("Bitte erst die Einstellungen speichern, danach wird angezeigt, welche Modelle ungenutzt sind.", true); return; }
+  if (modellListe && modellListe.gesperrt) { toast(modellListe.gesperrt, true); return; }
+  const w = modelleAuswahl();
+  if (!w.length) return;
+  const summe = w.reduce((s, x) => s + x.groesse, 0);
+  const ok = await frage("Ungenutzte Modelle löschen?",
+    `<p>Diese Modelle werden aus dem Datenordner gelöscht:</p><ul>${w.map((x) => `<li>${esc(x.name)}: ${groesseText(x.groesse)}</li>`).join("")}</ul>
+     <p>Dadurch werden <b>${groesseText(summe)}</b> frei. Deine Bilder und der Suchindex bleiben unverändert.</p>
+     <p>Schaltest du eine dieser Funktionen später wieder ein, wird das Modell automatisch neu heruntergeladen (braucht Internet).</p>`,
+    "Löschen");
+  if (!ok) return;
+  try {
+    const r = await api("/api/modelle/entfernen", { json: { ids: w.map((x) => x.id), bestaetigt: true } });
+    if (r.fehler.length) toast(`${groesseText(r.frei)} frei. Nicht gelöscht: ${r.fehler.map((f) => `${f.name} (${f.meldung})`).join("; ")}`, true);
+    else toast(`${r.entfernt.length} ${r.entfernt.length === 1 ? "Modell" : "Modelle"} gelöscht, ${groesseText(r.frei)} frei.`);
+  } catch (e) { toast(e.message, true); }
+  modelleZeigen();
 };
 $("#e-schwelle").oninput = (ev) => { $("#e-schwelle-wert").textContent = ev.target.value; };
 function zeichneQuellen() {
@@ -1463,6 +1513,7 @@ $("#e-speichern").onclick = async () => {
     S.einst = await api("/api/einstellungen", { json: neu });
     einstGeaendert = false;
     einstStand();
+    modelleZeigen();
     toast("Gespeichert");
   } catch (e) { toast(e.message, true); }
 };
