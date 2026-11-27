@@ -26,15 +26,23 @@ function toast(text, fehler = false) {
   toast._t = setTimeout(() => t.classList.remove("zeigen"), fehler ? 6000 : 2800);
 }
 
-function frage(titel, html, jaText = "OK") {
+// Liefert true (Ja), false (Abbrechen) oder "drittes", wenn ein dritter Knopf angegeben ist
+function frage(titel, html, jaText = "OK", drittesText = "") {
   return new Promise((ok) => {
     $("#dialog-titel").textContent = titel;
     $("#dialog-text").innerHTML = html;
     $("#dialog-ja").textContent = jaText;
+    $("#dialog-drittes").textContent = drittesText;
+    $("#dialog-drittes").hidden = !drittesText;
     $("#dialog").hidden = false;
-    const fertig = (w) => { $("#dialog").hidden = true; $("#dialog-ja").onclick = $("#dialog-nein").onclick = null; ok(w); };
+    const fertig = (w) => {
+      $("#dialog").hidden = true;
+      $("#dialog-ja").onclick = $("#dialog-nein").onclick = $("#dialog-drittes").onclick = null;
+      ok(w);
+    };
     $("#dialog-ja").onclick = () => fertig(true);
     $("#dialog-nein").onclick = () => fertig(false);
+    $("#dialog-drittes").onclick = () => fertig("drittes");
   });
 }
 
@@ -656,7 +664,30 @@ $("#e-schwelle").oninput = (ev) => { $("#e-schwelle-wert").textContent = ev.targ
 function zeichneQuellen() {
   $("#e-quellen").innerHTML = quellen.length ? quellen.map((q, i) => `<div class="quelle ${(S.quellenFehlen || []).includes(q) ? "fehlt" : ""}"><span>${esc(q)}</span>${(S.quellenFehlen || []).includes(q) ? `<small>nicht gefunden</small>` : ""}<button data-i="${i}" title="Entfernen">✕</button></div>`).join("")
     : `<div class="hinweis">Noch kein Ordner. Füge den Ordner deines Bilder-Backups hinzu.</div>`;
-  $$("#e-quellen button").forEach((b) => b.onclick = () => { quellen.splice(+b.dataset.i, 1); zeichneQuellen(); quellenSpeichern(); });
+  $$("#e-quellen button").forEach((b) => b.onclick = () => quelleEntfernen(quellen[+b.dataset.i]));
+}
+// Beim Entfernen fragen, ob die Bilder dieses Ordners auch aus dem Index (und damit aus Suche und Sortieren) sollen
+async function quelleEntfernen(pfad) {
+  try {
+    const { anzahl } = await api(`/api/quellen/anzahl?pfad=${encodeURIComponent(pfad)}`);
+    let ausIndex = false;
+    if (anzahl > 0) {
+      const w = await frage("Bilder-Ordner entfernen",
+        `<p><b>${esc(pfad)}</b></p><p>Im Index sind ${anzahl.toLocaleString("de-DE")} Bilder aus diesem Ordner.
+         Sollen sie auch aus dem Index entfernt werden? Dann tauchen sie in Suche und Sortieren nicht mehr auf.</p>
+         <p>Die Dateien selbst werden nicht angefasst. Behältst du sie im Index, müssen sie beim erneuten
+         Hinzufügen nicht neu analysiert werden.</p>`,
+        "Aus dem Index entfernen", "Im Index behalten");
+      if (w === false) return;
+      ausIndex = w === true;
+    }
+    const erg = await api("/api/quellen/entfernen", { json: { pfad, aus_index: ausIndex } });
+    S.einst = erg.einstellungen;
+    quellen = [...S.einst.quellen];
+    await status();
+    zeichneQuellen();
+    toast(ausIndex ? `Ordner entfernt, ${erg.entfernt.toLocaleString("de-DE")} Bilder aus dem Index genommen` : "Ordner entfernt");
+  } catch (e) { toast(e.message, true); }
 }
 // Bilder-Ordner werden sofort gespeichert, sonst meldet "Index erstellen" trotzdem "kein Ordner"
 async function quellenSpeichern() {

@@ -17,8 +17,8 @@ from PIL import Image
 from . import modelle, personen, sortieren, zwischenablage
 from .datenbank import Datenbank
 from .einstellungen import Einstellungen, daten_ordner
-from .indexer import Indexer, Modelle, alle_neu_einordnen, lade_themen, text_suche_bedingung, vorschau_erzeugen, \
-    vorschau_pfad
+from .indexer import Indexer, Modelle, alle_neu_einordnen, bilder_entfernen, bilder_im_ordner, lade_themen, \
+    text_suche_bedingung, vorschau_erzeugen, vorschau_pfad
 from .klassifizierung import UNKLAR
 
 log = logging.getLogger(__name__)
@@ -93,6 +93,24 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
         if any(k in neu for k in ("kategorien", "arbeitszeit", "inhalt", "schwelle", "regeln", "themen")):
             threading.Thread(target=_einordnen, daemon=True).start()
         return werte
+
+    @app.get("/api/quellen/anzahl")
+    def quelle_anzahl(pfad: str):
+        """Wie viele Bilder im Index aus diesem Bilder-Ordner stammen (für die Abfrage beim Entfernen)."""
+        andere = [q for q in z.e["quellen"] if q != pfad]
+        return {"anzahl": len(bilder_im_ordner(z.db, pfad, andere))}
+
+    @app.post("/api/quellen/entfernen")
+    def quelle_entfernen(daten: dict = Body(...)):
+        """Bilder-Ordner austragen; mit ``aus_index`` auch seine Bilder aus dem Index (Dateien bleiben)."""
+        pfad = daten.get("pfad") or ""
+        aus_index = bool(daten.get("aus_index"))
+        if aus_index and z.indexer.status["laeuft"]:
+            raise HTTPException(409, "Der Index läuft gerade. Bitte erst anhalten.")
+        andere = [q for q in z.e["quellen"] if q != pfad]
+        werte = z.e.aktualisieren({"quellen": andere})
+        entfernt = bilder_entfernen(z.db, bilder_im_ordner(z.db, pfad, andere)) if aus_index and pfad else 0
+        return {"einstellungen": werte, "entfernt": entfernt}
 
     def _einordnen():
         try:
