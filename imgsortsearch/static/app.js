@@ -1187,6 +1187,22 @@ $("#e-karte-leeren").onclick = async () => {
   try { await api("/api/karte/leeren", { method: "POST" }); toast("Gespeicherte Kartenbilder gelöscht"); kartenSpeicher(); }
   catch (e) { toast(e.message, true); }
 };
+$("#e-index-zuruecksetzen").onclick = async () => {
+  const ok = await frage("Index zurücksetzen?",
+    "Der Suchindex wird komplett gelöscht: alle Bilder im Index, erkannte Gesichter, Personen mit ihren Namen, " +
+    "von Hand gesetzte Kategorien und Vorschaubilder. Das lässt sich nicht rückgängig machen.<br><br>" +
+    "Deine Bilddateien, die Einstellungen, heruntergeladene Modelle und die Protokolle für „Rückgängig“ bleiben. " +
+    "Danach wird der Index neu aufgebaut, das dauert je nach Anzahl der Bilder einige Zeit.<br><br>" +
+    "Zum Bestätigen bitte <b>LÖSCHEN</b> eintippen:<br><input id=\"zurueck-wort\" autocomplete=\"off\">",
+    "Index löschen");
+  if (!ok) return;
+  if (($("#zurueck-wort")?.value || "").trim().toUpperCase() !== "LÖSCHEN") { toast("Nicht bestätigt, nichts gelöscht.", true); return; }
+  try {
+    const r = await api("/api/index/zuruecksetzen", { json: { bestaetigt: true } });
+    toast(`Index zurückgesetzt (${r.entfernt.toLocaleString("de")} Bilder entfernt).`);
+    location.reload();
+  } catch (e) { toast(e.message, true); }
+};
 $("#e-schwelle").oninput = (ev) => { $("#e-schwelle-wert").textContent = ev.target.value; };
 function zeichneQuellen() {
   $("#e-quellen").innerHTML = quellen.length ? quellen.map((q, i) => `<div class="quelle ${(S.quellenFehlen || []).includes(q) ? "fehlt" : ""}"><span>${esc(q)}</span>${(S.quellenFehlen || []).includes(q) ? `<small>nicht gefunden</small>` : ""}<button data-i="${i}" title="Entfernen">✕</button></div>`).join("")

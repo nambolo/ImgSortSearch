@@ -707,21 +707,44 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
         return {"gestartet": True}
 
     def _pfade_aktualisieren(aenderungen):
+        """(bild_id, alter Pfad, neuer Pfad). Das Bild wird über den alten Pfad gefunden, nicht über die
+        Nummer: nach einem Zurücksetzen des Index gehört die Nummer womöglich einem anderen Bild."""
         geaendert = []
         with z.db.verbindung() as v:
-            for bild_id, pfad in aenderungen:
-                if not bild_id:
-                    continue
+            for _bild_id, alt, pfad in aenderungen:
                 try:
                     st = Path(pfad).stat()
                 except OSError:  # Datei inzwischen weg: der nächste Indexlauf räumt auf
                     continue
+                r = v.execute("SELECT id FROM bilder WHERE pfad=?", (alt,)).fetchone()
+                if not r:  # nicht (mehr) im Index: der nächste Indexlauf nimmt die Datei auf
+                    continue
                 # Größe mitführen (eingebettete Tags ändern sie), sonst gilt das Bild als geändert
                 # und wird beim nächsten Lauf komplett neu analysiert
                 v.execute("UPDATE OR IGNORE bilder SET pfad=?, mtime=?, groesse=? WHERE id=?",
-                          (pfad, st.st_mtime, st.st_size, bild_id))
-                geaendert.append(bild_id)
+                          (pfad, st.st_mtime, st.st_size, r[0]))
+                geaendert.append(r[0])
         z.db.suchtext_aktualisieren_viele(geaendert)  # neuer Dateiname soll gefunden werden
+
+    # ------------------------------------------------------------ Index zurücksetzen
+
+    @app.post("/api/index/zuruecksetzen")
+    def index_zuruecksetzen(daten: dict = Body(...)):
+        """Index leeren (Bilder, Gesichter, Personen, Vorschaubilder), um von vorn anzufangen.
+        Bleiben: Einstellungen, heruntergeladene Modelle, Protokolle (Rückgängig), Quarantäne, Kartenbilder.
+        Die Bilddateien selbst werden nicht angefasst."""
+        if daten.get("bestaetigt") is not True:
+            raise HTTPException(400, "Bitte bestätigen.")
+        if z.indexer.status["laeuft"] or z.sortier_status["laeuft"] or z.dubletten.status.get("laeuft"):
+            raise HTTPException(409, "Es läuft gerade etwas (Index, Sortieren oder Dublettensuche). Bitte erst anhalten.")
+        n = z.db.zuruecksetzen()
+        for ordner in ("vorschau", "gesichter"):
+            shutil.rmtree(daten_ordner() / ordner, ignore_errors=True)
+        z.dubletten_ergebnis = None
+        z.indexer.status.update(phase="bereit", fertig=0, gesamt=0, meldung="Index zurückgesetzt.", fehler=[],
+                                aktuell=None, aktuell_pfad="")
+        log.info("Index zurückgesetzt (%d Bilder entfernt)", n)
+        return {"entfernt": n}
 
     @app.get("/api/protokolle")
     def protokolle():
