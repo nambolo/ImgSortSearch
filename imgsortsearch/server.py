@@ -46,6 +46,17 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
     app = FastAPI(title="ImgSortSearch")
     app.state.z = z
 
+    @app.middleware("http")
+    async def nur_lokal(request, call_next):
+        # Schutz gegen fremde Webseiten im Browser: DNS-Rebinding (falscher Host) und
+        # Cross-Site-Anfragen, die sonst z. B. ein Sortieren auslösen könnten.
+        host = (request.headers.get("host") or "").rsplit(":", 1)[0].strip("[]").lower()
+        if host not in ("127.0.0.1", "localhost", "::1", "testserver"):
+            return JSONResponse({"detail": "Nur lokal erreichbar"}, status_code=403)
+        if request.method not in ("GET", "HEAD", "OPTIONS") and request.headers.get("x-imgsortsearch") != "1":
+            return JSONResponse({"detail": "Anfrage abgelehnt"}, status_code=403)
+        return await call_next(request)
+
     def bild_oder_404(bild_id: int):
         r = z.db.eins(f"SELECT *, {KAT} AS kategorie FROM bilder WHERE id=?", (bild_id,))
         if not r:
@@ -66,7 +77,8 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
         offen = z.db.eins("SELECT COUNT(*) AS n FROM bilder WHERE schritt_clip=0 AND fehler IS NULL")["n"]
         return {"index": z.indexer.status, "kategorien": zahlen, "gesamt": sum(zahlen.values()),
                 "offen": offen, "modell_fehler": z.m.fehler, "geraete": z.m.geraete(), "exiftool": shutil.which("exiftool") is not None,
-                "sortieren": z.sortier_status}
+                "sortieren": z.sortier_status,
+                "quellen_fehlen": [q for q in z.e["quellen"] if not Path(q).is_dir()]}
 
     @app.get("/api/einstellungen")
     def einstellungen_lesen():
@@ -95,7 +107,10 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
     def ordner_waehlen():
         if z.fenster is not None:
             import webview
-            erg = z.fenster.create_file_dialog(webview.FileDialog.FOLDER)
+            art = getattr(getattr(webview, "FileDialog", None), "FOLDER", None)
+            erg = z.fenster.create_file_dialog(art if art is not None else webview.FOLDER_DIALOG)
+            if isinstance(erg, str):  # je nach pywebview-Version Text oder Liste
+                return {"pfad": erg or None}
             return {"pfad": erg[0] if erg else None}
         try:  # Fallback ohne eigenes Fenster
             import tkinter
@@ -293,7 +308,10 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
 
     @app.post("/api/bilder/{bild_id}/explorer")
     def explorer(bild_id: int):
-        zwischenablage.im_explorer_zeigen(bild_oder_404(bild_id)["pfad"])
+        try:
+            zwischenablage.im_explorer_zeigen(bild_oder_404(bild_id)["pfad"])
+        except (OSError, RuntimeError) as ex:
+            raise HTTPException(400, str(ex))
         return {"ok": True}
 
     # ------------------------------------------------------------ Themen
@@ -411,10 +429,11 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
         s = dict(z.e["sortieren"], **daten.get("einstellungen", {}))
         z.e.aktualisieren({"sortieren": s})
         auftraege = _auftraege(daten.get("nur"))
+        # schon hier setzen: sonst sieht die Oberfläche kurz "läuft nicht" und zeigt ein altes Ergebnis
+        z.sortier_status.update(laeuft=True, fertig=0, gesamt=len(auftraege), ergebnis=None)
 
         def lauf():
             st = z.sortier_status
-            st.update(laeuft=True, fertig=0, gesamt=len(auftraege), ergebnis=None)
             try:
                 erg = sortieren.ausfuehren(auftraege, s, daten_ordner() / "protokolle", echt=True,
                                            fortschritt=lambda n, g: st.update(fertig=n, gesamt=g))
@@ -436,11 +455,21 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
         return {"gestartet": True}
 
     def _pfade_aktualisieren(aenderungen):
+        geaendert = []
         with z.db.verbindung() as v:
             for bild_id, pfad in aenderungen:
-                if bild_id:
+                if not bild_id:
+                    continue
+                try:
                     st = Path(pfad).stat()
-                    v.execute("UPDATE bilder SET pfad=?, mtime=? WHERE id=?", (pfad, st.st_mtime, bild_id))
+                except OSError:  # Datei inzwischen weg: der nächste Indexlauf räumt auf
+                    continue
+                # Größe mitführen (eingebettete Tags ändern sie), sonst gilt das Bild als geändert
+                # und wird beim nächsten Lauf komplett neu analysiert
+                v.execute("UPDATE OR IGNORE bilder SET pfad=?, mtime=?, groesse=? WHERE id=?",
+                          (pfad, st.st_mtime, st.st_size, bild_id))
+                geaendert.append(bild_id)
+        z.db.suchtext_aktualisieren_viele(geaendert)  # neuer Dateiname soll gefunden werden
 
     @app.get("/api/protokolle")
     def protokolle():

@@ -7,7 +7,8 @@ const esc = (t) => String(t ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const FARBEN = ["#2563eb", "#16a34a", "#f59e0b", "#db2777", "#0891b2", "#7c3aed", "#ea580c", "#65a30d"];
 
 async function api(pfad, opt = {}) {
-  const o = { headers: {}, ...opt };
+  // Kennung, ohne die der Server ändernde Anfragen ablehnt (Schutz vor fremden Webseiten)
+  const o = { ...opt, headers: { "X-ImgSortSearch": "1", ...(opt.headers || {}) } };
   if (o.json !== undefined) { o.body = JSON.stringify(o.json); o.headers["Content-Type"] = "application/json"; o.method = o.method || "POST"; }
   const r = await fetch(pfad, o);
   let daten = null;
@@ -52,24 +53,34 @@ function farbe(kat) { return S.farben[kat] || "#475069"; }
 function zeige(ansicht) {
   $$("nav button").forEach((b) => b.classList.toggle("aktiv", b.dataset.ansicht === ansicht));
   $$(".ansicht").forEach((a) => a.classList.toggle("aktiv", a.id === "ansicht-" + ansicht));
-  ({ themen: ladeThemen, personen: ladePersonen, sortieren: ladeSortieren, einstellungen: ladeEinstellungen }[ansicht] || (() => {}))();
+  const laden = { themen: ladeThemen, personen: ladePersonen, sortieren: ladeSortieren, einstellungen: ladeEinstellungen }[ansicht];
+  if (laden) Promise.resolve().then(laden).catch((e) => toast(e.message, true));
 }
 $$("nav button").forEach((b) => b.addEventListener("click", () => zeige(b.dataset.ansicht)));
 
 /* ------------------------------------------------------------ Status */
 
 let letzteAktuell = null;
+let statusTimer = null;
 async function status() {
+  clearTimeout(statusTimer);
   try {
     const s = await api("/api/status");
     const i = s.index;
     const knopf = $("#index-knopf");
-    knopf.textContent = i.laeuft ? "Anhalten" : (s.gesamt ? "Index aktualisieren" : "Index erstellen");
+    if (!i.laeuft) S.wirdAngehalten = false;
+    const fortsetzen = i.phase === "angehalten" && s.offen > 0;
+    knopf.textContent = i.laeuft ? (S.wirdAngehalten ? "Wird angehalten …" : "Anhalten")
+      : (fortsetzen ? "Fortsetzen" : (s.gesamt ? "Index aktualisieren" : "Index erstellen"));
+    knopf.disabled = i.laeuft && S.wirdAngehalten;
     knopf.classList.toggle("primaer", !i.laeuft);
     $("#index-phase").textContent = { suchen: "Suche Dateien", metadaten: "Metadaten", analyse: "Analyse", einordnen: "Einordnen", fertig: "Index", angehalten: "Angehalten", fehler: "Fehler", bereit: "Index" }[i.phase] || "Index";
     $("#index-zahl").textContent = i.laeuft && i.gesamt ? `${i.fertig.toLocaleString("de")} / ${i.gesamt.toLocaleString("de")}` : `${s.gesamt.toLocaleString("de")} Bilder`;
     $("#index-balken").style.width = i.gesamt ? `${(100 * i.fertig) / i.gesamt}%` : (i.laeuft ? "5%" : "0");
-    $("#index-meldung").textContent = i.meldung || (s.offen ? `${s.offen.toLocaleString("de")} Bilder noch nicht analysiert.` : (s.gesamt ? "Index ist aktuell." : "Noch kein Index erstellt."));
+    const meldung = i.phase === "angehalten" && s.offen ? `Angehalten. ${s.offen.toLocaleString("de")} Bilder noch nicht analysiert.` : i.meldung;
+    const fehlen = (s.quellen_fehlen || []).length ? ` ${s.quellen_fehlen.length} Bilder-Ordner nicht gefunden.` : "";
+    $("#index-meldung").textContent = (meldung || (s.offen ? `${s.offen.toLocaleString("de")} Bilder noch nicht analysiert.` : (s.gesamt ? "Index ist aktuell." : "Noch kein Index erstellt."))) + fehlen;
+    S.quellenFehlen = s.quellen_fehlen || [];
     const bild = $("#index-bild");
     bild.classList.toggle("laeuft", i.laeuft && i.phase === "analyse");
     if (i.laeuft && i.aktuell && i.aktuell !== letzteAktuell) {
@@ -92,11 +103,11 @@ async function status() {
       zeigeSortierErgebnis(s.sortieren.ergebnis, true);
       ladeProtokolle();
     }
-    if (S.indexLief && !i.laeuft) { suchen(); ladeFilter(); }
+    if (S.indexLief && !i.laeuft) { if (!S.bildSuche) suchen(false, true); ladeFilter(); }
     S.indexLief = i.laeuft;
     $("#e-status").innerHTML = statusText(s);
   } catch (e) { /* Server startet noch */ }
-  setTimeout(status, S.indexLief ? 1000 : 2500);
+  statusTimer = setTimeout(status, S.indexLief ? 1000 : 2500);
 }
 
 function statusText(s) {
@@ -113,9 +124,19 @@ function statusText(s) {
 
 $("#index-knopf").onclick = async () => {
   try {
-    if (S.indexLief) { await api("/api/index/stop", { method: "POST" }); toast("Wird nach dem aktuellen Stapel angehalten …"); }
-    else { await api("/api/index/start", { method: "POST" }); S.indexLief = true; toast("Index wird erstellt. Du kannst währenddessen schon suchen."); }
-  } catch (e) { toast(e.message, true); if (/Ordner/.test(e.message)) zeige("einstellungen"); }
+    if (S.indexLief) {
+      S.wirdAngehalten = true;
+      $("#index-knopf").textContent = "Wird angehalten …";
+      $("#index-knopf").disabled = true;
+      await api("/api/index/stop", { method: "POST" });
+      toast("Wird nach dem aktuellen Stapel angehalten …");
+    } else {
+      await api("/api/index/start", { method: "POST" });
+      S.indexLief = true;
+      toast("Index wird erstellt. Du kannst währenddessen schon suchen.");
+    }
+  } catch (e) { S.wirdAngehalten = false; toast(e.message, true); if (/Ordner/.test(e.message)) zeige("einstellungen"); }
+  status();
 };
 
 /* ------------------------------------------------------------ Suche */
@@ -143,8 +164,14 @@ function suchParameter(offset) {
 }
 
 let suchNr = 0;
-async function suchen(weiter = false) {
-  if (S.bildSuche && !weiter) { S.bildSuche = null; }
+function fotoSucheBeenden() {
+  S.bildSuche = null;
+  $("#f-foto-chip").hidden = true;
+}
+
+async function suchen(weiter = false, behalten = false) {
+  if (S.bildSuche && weiter) return;  // Fotosuche liefert alle Treffer auf einmal
+  if (!weiter) fotoSucheBeenden();
   const nr = ++suchNr;
   const offset = weiter ? S.bilder.length : 0;
   try {
@@ -152,13 +179,23 @@ async function suchen(weiter = false) {
     if (nr !== suchNr) return;
     S.gesamt = r.gesamt;
     S.bilder = weiter ? S.bilder.concat(r.bilder) : r.bilder;
-    if (!weiter) { S.gewaehlt.clear(); S.fokus = S.bilder[0]?.id ?? null; }
+    const da = new Set(S.bilder.map((b) => b.id));
+    if (!weiter && behalten) {
+      S.gewaehlt = new Set([...S.gewaehlt].filter((i) => da.has(i)));
+      if (!da.has(S.fokus)) S.fokus = S.bilder[0]?.id ?? null;
+    } else if (!weiter) { S.gewaehlt.clear(); S.fokus = S.bilder[0]?.id ?? null; }
     zeichneErgebnis();
     if (!weiter && S.modus === "liste" && S.fokus) zeigeDetail(S.fokus);
   } catch (e) { toast(e.message, true); }
 }
 
-function zeigeTreffer(gesamt, bilder) {
+function zeigeTreffer(gesamt, bilder, text) {
+  ++suchNr;  // eine noch laufende normale Suche darf das Ergebnis nicht mehr überschreiben
+  S.bildSuche = text;
+  const c = $("#f-foto-chip");
+  c.hidden = false;
+  c.innerHTML = `${esc(text)} <button title="Zurück zur normalen Suche">✕</button>`;
+  $("button", c).onclick = () => suchen();
   S.gesamt = gesamt; S.bilder = bilder; S.gewaehlt.clear(); S.fokus = bilder[0]?.id ?? null;
   zeichneErgebnis();
   if (S.modus === "liste" && S.fokus) zeigeDetail(S.fokus);
@@ -186,6 +223,12 @@ function zeichneErgebnis() {
   if (m) m.onclick = () => suchen(true);
   if (!S.bilder.length && S.modus === "raster") $("#raster").innerHTML = `<div class="mehr hinweis">Keine Bilder gefunden. ${S.gesamt === 0 && !$("#q").value ? "Lege unter Einstellungen einen Bilder-Ordner an und starte den Index." : ""}</div>`;
   auswahlLeiste();
+}
+
+function groesseText(n) {
+  n = n || 0;
+  if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024)).toLocaleString("de")} KB`;
+  return `${(n / 1048576).toLocaleString("de", { maximumFractionDigits: 1 })} MB`;
 }
 
 function datumText(d) {
@@ -241,7 +284,17 @@ async function kategorieSetzen(ids, kat) {
     zeichneErgebnis();
     if (S.modus === "liste" && S.fokus) zeigeDetail(S.fokus);
     toast(kat ? `${ids.length} Bild(er) → ${kat}` : `${ids.length} Bild(er) wieder automatisch`);
-    if (!kat) suchen();
+    if (!kat) {
+      if (S.bildSuche) {  // Fotosuche nicht verwerfen, nur die betroffenen Bilder neu laden
+        for (const id of ids) {
+          const b = await api(`/api/bild/${id}`);
+          const x = S.bilder.find((y) => y.id === id);
+          if (x) { x.kategorie = b.kategorie_auto || "Unklar"; x.manuell = false; }
+        }
+        zeichneErgebnis();
+        if (S.modus === "liste" && S.fokus) zeigeDetail(S.fokus);
+      } else suchen(false, true);
+    }
   } catch (e) { toast(e.message, true); }
 }
 $("#auswahl-auto").onclick = () => kategorieSetzen([...S.gewaehlt], null);
@@ -279,7 +332,7 @@ async function zeigeDetail(id) {
           <dt>Aufgenommen</dt><dd>${esc(datumText(b.datum))} <span class="hinweis">(${esc(b.datum_quelle || "")})</span></dd>
           <dt>Kamera</dt><dd>${esc([b.hersteller, b.modell].filter(Boolean).join(" ") || "unbekannt")}</dd>
           ${b.gps_lat != null ? `<dt>Ort</dt><dd>${b.gps_lat.toFixed(5)}, ${b.gps_lon.toFixed(5)}</dd>` : ""}
-          <dt>Größe</dt><dd>${b.breite || "?"} × ${b.hoehe || "?"} · ${((b.groesse || 0) / 1048576).toFixed(1)} MB</dd>
+          <dt>Größe</dt><dd>${b.breite || "?"} × ${b.hoehe || "?"} · ${groesseText(b.groesse)}</dd>
           <dt>Personen</dt><dd>${(b.gesichter || []).length ? b.gesichter.map((g) => esc(g.name || "unbenannt")).join(", ") : "keine erkannt"}</dd>
           <dt>Einordnung</dt><dd>${esc(b.gruende || "–")}</dd>
           <dt>Pfad</dt><dd>${esc(b.pfad)}</dd>
@@ -336,17 +389,24 @@ $("#bild-suche").addEventListener("change", async (e) => {
   toast("Suche ähnliche Bilder …");
   try {
     const r = await api("/api/suche-mit-bild", { method: "POST", body: fd });
-    zeigeTreffer(r.gesamt, r.bilder);
+    zeigeTreffer(r.gesamt, r.bilder, `Ähnlich wie ${f.name}`);
+    toast(`${r.gesamt} ähnliche Bilder gefunden`);
   } catch (err) { toast(err.message, true); }
   e.target.value = "";
 });
 
 document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    if (!$("#vollbild").hidden) { $("#vollbild").hidden = true; return; }
+    if (!$("#dialog").hidden) { $("#dialog-nein").click(); return; }
+  }
   if (!$("#ansicht-suche").classList.contains("aktiv")) return;
+  if (!$("#vollbild").hidden || !$("#dialog").hidden) return;  // nichts darunter verändern
   const imFeld = ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName);
-  if (e.key === "Escape") { $("#vollbild").hidden = true; }
   if (imFeld) return;
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c") { e.preventDefault(); kopieren(); }
+  // markierten Text (Pfad, erkannter Text ...) normal kopieren statt der Bilddateien
+  const textMarkiert = String(window.getSelection() || "").trim() !== "";
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c" && !textMarkiert) { e.preventDefault(); kopieren(); }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") { e.preventDefault(); S.bilder.forEach((b) => S.gewaehlt.add(b.id)); aktualisiereAuswahl(); }
   if (["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"].includes(e.key) && S.bilder.length) {
     e.preventDefault();
@@ -362,6 +422,10 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && S.fokus && S.modus === "raster") { setzeModus("liste"); zeichneErgebnis(); zeigeDetail(S.fokus); scrolleZuFokus(); }
 });
 $("#vollbild").onclick = () => { $("#vollbild").hidden = true; };
+// Eine Datei, die neben die Ablagefläche fällt, würde sonst das Programmfenster durch das Bild ersetzen
+["dragover", "drop"].forEach((art) => window.addEventListener(art, (e) => {
+  if (!(e.target instanceof Element) || !e.target.closest("#ablage")) e.preventDefault();
+}));
 
 /* ------------------------------------------------------------ Themen & Kategorien */
 
@@ -434,7 +498,10 @@ async function ladePersonen() {
     const id = +el.dataset.id;
     const name = $("input:not(.wahl)", el);
     $("img", el).onclick = () => personFilter(id, name.value);
-    name.onchange = async () => { await api(`/api/personen/${id}/name`, { json: { name: name.value } }); toast("Name gespeichert"); ladePersonen(); };
+    name.onchange = async () => {
+      try { await api(`/api/personen/${id}/name`, { json: { name: name.value } }); toast("Name gespeichert"); await ladePersonen(); }
+      catch (e) { toast(e.message, true); }
+    };
     $(".wahl", el).onchange = (e) => {
       e.target.checked ? personenWahl.add(id) : personenWahl.delete(id);
       el.classList.toggle("gewaehlt", e.target.checked);
@@ -442,12 +509,17 @@ async function ladePersonen() {
     };
   });
 }
-$("#personen-gruppieren").onclick = async () => { const r = await api("/api/personen/neu-gruppieren", { method: "POST" }); toast(`${r.zugeordnet} Gesichter zugeordnet`); ladePersonen(); };
+$("#personen-gruppieren").onclick = async () => {
+  try { const r = await api("/api/personen/neu-gruppieren", { method: "POST" }); toast(`${r.zugeordnet} Gesichter zugeordnet`); await ladePersonen(); }
+  catch (e) { toast(e.message, true); }
+};
 $("#personen-zusammen").onclick = async () => {
   const ids = [...personenWahl];
-  await api("/api/personen/zusammenfuehren", { json: { ziel: ids[0], quellen: ids.slice(1) } });
-  toast("Zusammengeführt");
-  ladePersonen();
+  try {
+    await api("/api/personen/zusammenfuehren", { json: { ziel: ids[0], quellen: ids.slice(1) } });
+    toast("Zusammengeführt");
+    await ladePersonen();
+  } catch (e) { toast(e.message, true); }
 };
 async function personSuchen(datei) {
   const fd = new FormData();
@@ -457,7 +529,7 @@ async function personSuchen(datei) {
     const r = await api("/api/personensuche", { method: "POST", body: fd });
     if (!r.gesichter.length) { toast("Auf dem Foto wurde kein Gesicht gefunden.", true); return; }
     zeige("suche");
-    zeigeTreffer(r.gesamt, r.bilder);
+    zeigeTreffer(r.gesamt, r.bilder, `Person aus ${datei.name || "Foto"}`);
     toast(`${r.gesamt} Bilder mit dieser Person gefunden${r.gesichter.length > 1 ? " (größtes Gesicht auf dem Foto verwendet)" : ""}`);
   } catch (e) { toast(e.message, true); }
 }
@@ -542,13 +614,17 @@ async function ladeProtokolle() {
       ${p.rueckgaengig ? "<span class='hinweis'>rückgängig gemacht</span>" : `<button class="knopf leicht" data-p="${p.id}">Rückgängig</button>`}</div>`).join("")
     : `<div class="hinweis">Noch keine Läufe.</div>`;
   $$("#protokolle [data-p]").forEach((b) => b.onclick = async () => {
-    const v = await api(`/api/protokolle/${b.dataset.p}/rueckgaengig`, { method: "POST" });
-    const ok = await frage("Lauf rückgängig machen?", `${v.anzahl} Schritte werden zurückgenommen.${v.probleme.length ? `<br><br>${v.probleme.length} Einträge werden übersprungen:<br>${v.probleme.slice(0, 10).map(esc).join("<br>")}` : ""}`, "Rückgängig machen");
-    if (!ok) return;
-    await api(`/api/protokolle/${b.dataset.p}/rueckgaengig?echt=true`, { method: "POST" });
-    toast("Rückgängig gemacht");
-    ladeProtokolle();
-    suchen();
+    try {
+      const v = await api(`/api/protokolle/${b.dataset.p}/rueckgaengig`, { method: "POST" });
+      const probleme = v.probleme || [];
+      const ok = await frage("Lauf rückgängig machen?", `${v.anzahl} Schritte werden zurückgenommen.${probleme.length ? `<br><br>${probleme.length} Einträge werden übersprungen:<br>${probleme.slice(0, 10).map(esc).join("<br>")}` : ""}`, "Rückgängig machen");
+      if (!ok) return;
+      b.disabled = true;  // kein doppelter Klick während des Laufs
+      await api(`/api/protokolle/${b.dataset.p}/rueckgaengig?echt=true`, { method: "POST" });
+      toast("Rückgängig gemacht");
+      ladeProtokolle();
+      suchen();
+    } catch (e) { b.disabled = false; toast(e.message, true); }
   });
 }
 
@@ -578,17 +654,32 @@ function ladeEinstellungen() {
 }
 $("#e-schwelle").oninput = (ev) => { $("#e-schwelle-wert").textContent = ev.target.value; };
 function zeichneQuellen() {
-  $("#e-quellen").innerHTML = quellen.length ? quellen.map((q, i) => `<div class="quelle"><span>${esc(q)}</span><button data-i="${i}" title="Entfernen">✕</button></div>`).join("")
+  $("#e-quellen").innerHTML = quellen.length ? quellen.map((q, i) => `<div class="quelle ${(S.quellenFehlen || []).includes(q) ? "fehlt" : ""}"><span>${esc(q)}</span>${(S.quellenFehlen || []).includes(q) ? `<small>nicht gefunden</small>` : ""}<button data-i="${i}" title="Entfernen">✕</button></div>`).join("")
     : `<div class="hinweis">Noch kein Ordner. Füge den Ordner deines Bilder-Backups hinzu.</div>`;
-  $$("#e-quellen button").forEach((b) => b.onclick = () => { quellen.splice(+b.dataset.i, 1); zeichneQuellen(); });
+  $$("#e-quellen button").forEach((b) => b.onclick = () => { quellen.splice(+b.dataset.i, 1); zeichneQuellen(); quellenSpeichern(); });
 }
-$("#e-quelle-waehlen").onclick = () => ordnerWaehlen("#e-quelle-neu");
-$("#e-quelle-add").onclick = () => {
+// Bilder-Ordner werden sofort gespeichert, sonst meldet "Index erstellen" trotzdem "kein Ordner"
+async function quellenSpeichern() {
+  try {
+    S.einst = await api("/api/einstellungen", { json: { quellen } });
+    await status();
+    zeichneQuellen();
+    const fehlt = quellen.filter((q) => S.quellenFehlen.includes(q));
+    if (fehlt.length) toast(`Ordner nicht gefunden: ${fehlt.join(", ")}`, true); else toast("Bilder-Ordner gespeichert");
+  }
+  catch (e) { toast(e.message, true); }
+}
+function quelleHinzufuegen() {
   const p = $("#e-quelle-neu").value.trim();
-  if (p && !quellen.includes(p)) quellen.push(p);
   $("#e-quelle-neu").value = "";
+  if (!p || quellen.includes(p)) return;
+  quellen.push(p);
   zeichneQuellen();
-};
+  quellenSpeichern();
+}
+$("#e-quelle-waehlen").onclick = async () => { await ordnerWaehlen("#e-quelle-neu"); quelleHinzufuegen(); };
+$("#e-quelle-add").onclick = quelleHinzufuegen;
+$("#e-quelle-neu").addEventListener("keydown", (e) => { if (e.key === "Enter") quelleHinzufuegen(); });
 $("#e-speichern").onclick = async () => {
   const neu = {
     quellen,
@@ -623,6 +714,7 @@ async function ladeGrundlagen() {
   for (let i = 0; i < 50; i++) {
     try { await ladeGrundlagen(); break; } catch { await new Promise((r) => setTimeout(r, 200)); }
   }
+  if (!S.einst) { toast("Verbindung zum Programm fehlgeschlagen. Bitte neu starten.", true); return; }
   await ladeFilter().catch(() => {});
   suchen();
   status();

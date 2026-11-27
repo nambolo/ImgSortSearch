@@ -46,15 +46,23 @@ def _sauber(text: str) -> str:
     return re.sub(r"\s+", "-", text) or "_"
 
 
+def _fuellen(vorlage: str, werte: dict) -> str:
+    try:
+        return vorlage.format(**werte)
+    except (KeyError, IndexError, ValueError) as ex:
+        erlaubt = ", ".join("{" + k + "}" for k in werte)
+        raise ValueError(f"Ungültige Vorlage '{vorlage}' ({ex}). Erlaubt: {erlaubt}") from None
+
+
 def ziel_relativ(a: Auftrag, s: dict) -> Path:
     """Relativer Zielpfad nach Namens- und Ordnerschema."""
     werte = {"datum": _Datum(a.datum), "kategorie": _sauber(a.kategorie), "kamera": _sauber(a.kamera or "Unbekannt"),
              "original": _sauber(a.pfad.stem)}
     vorlage = s.get("name", "{original}") if a.datum else "{original}"  # ohne Datum: alten Namen behalten
-    name = (_sauber(vorlage.format(**werte)) + a.pfad.suffix.lower()) if s.get("umbenennen") else a.pfad.name
+    name = (_sauber(_fuellen(vorlage, werte)) + a.pfad.suffix.lower()) if s.get("umbenennen") else a.pfad.name
     if s.get("modus") == "nur_taggen":
         return Path(name)
-    ordner = s.get("ordner", "{kategorie}").format(**werte)
+    ordner = _fuellen(s.get("ordner", "{kategorie}"), werte)
     return Path(*[_sauber(t) for t in ordner.replace("\\", "/").split("/") if t.strip()]) / name
 
 
@@ -108,24 +116,116 @@ def xmp_sidecar(a: Auftrag) -> str:
             '<?xpacket end="w"?>\n')
 
 
-def _einbetten(datei: Path, a: Auftrag, sicherung: bool) -> None:
-    exiftool = shutil.which("exiftool")
-    if not exiftool:
-        raise RuntimeError("exiftool nicht gefunden")
-    cmd = [exiftool, "-P", "-charset", "iptc=utf8", "-codedcharacterset=utf8"]
+def _einbetten_argumente(datei: Path, a: Auftrag, sicherung: bool) -> list[str]:
+    args = ["-P", "-charset", "filename=utf8", "-charset", "iptc=utf8", "-codedcharacterset=utf8"]
     if not sicherung:
-        cmd.append("-overwrite_original")
+        args.append("-overwrite_original")
+    # erst entfernen, dann hinzufügen: so entstehen bei einem zweiten Lauf keine doppelten Einträge
     for t in alle_tags(a):
-        cmd += [f"-XMP-dc:Subject-={t}", f"-XMP-dc:Subject+={t}", f"-IPTC:Keywords-={t}", f"-IPTC:Keywords+={t}"]
-    cmd.append(f"-XMP-lr:HierarchicalSubject+=ImgSortSearch|Kategorie|{a.kategorie}")
-    for p in a.personen:
-        cmd.append(f"-XMP-lr:HierarchicalSubject+=Personen|{p}")
+        args += [f"-XMP-dc:Subject-={t}", f"-XMP-dc:Subject+={t}", f"-IPTC:Keywords-={t}", f"-IPTC:Keywords+={t}"]
+    hier = [f"ImgSortSearch|Kategorie|{a.kategorie}"] + [f"Personen|{p}" for p in a.personen]
+    for h in hier:
+        args += [f"-XMP-lr:HierarchicalSubject-={h}", f"-XMP-lr:HierarchicalSubject+={h}"]
     if a.beschreibung:
-        cmd.append(f"-XMP-dc:Description={a.beschreibung}")
-    cmd.append(str(datei))
-    proc = subprocess.run(cmd, capture_output=True, text=True, creationflags=_KEIN_FENSTER)
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip())
+        args.append(f"-XMP-dc:Description={a.beschreibung}")
+    args.append(str(datei))
+    return [" ".join(x.splitlines()) for x in args]  # eine Zeile pro Argument
+
+
+# Formate, in die exiftool Metadaten schreiben kann (BMP z. B. nicht: dafür XMP-Datei daneben)
+EINBETTEN_ENDUNGEN = {".jpg", ".jpeg", ".tif", ".tiff", ".png", ".heic", ".heif", ".webp", ".gif"}
+
+
+class _Exiftool:
+    """Ein dauerhaft laufendes exiftool (-stay_open) für alle Dateien eines Laufs.
+
+    Ein eigener Aufruf pro Bild kostet unter Windows fast eine Sekunde (Start des Programms);
+    bei 10.000 Bildern wären das Stunden. Die Argumente gehen als UTF-8 über stdin
+    (wie eine Argumentdatei), damit Umlaute in Namen und Pfaden heil ankommen."""
+
+    ZEITLIMIT = 120
+
+    def __init__(self):
+        self.exe = shutil.which("exiftool")
+        if not self.exe:
+            raise RuntimeError("exiftool nicht gefunden")
+        self.proc = None
+
+    def _starten(self):
+        import queue
+        import threading
+        self.proc = subprocess.Popen([self.exe, "-stay_open", "True", "-@", "-"], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=_KEIN_FENSTER)
+        self.zeilen = queue.Queue()
+        proc = self.proc
+
+        def lesen():
+            for zeile in iter(proc.stdout.readline, b""):
+                self.zeilen.put(zeile)
+            self.zeilen.put(None)  # Prozess beendet
+
+        threading.Thread(target=lesen, daemon=True).start()
+
+    def schreiben(self, args: list[str]) -> None:
+        import queue
+        if self.proc is None or self.proc.poll() is not None:
+            self._starten()
+        self.proc.stdin.write(("\n".join(args) + "\n-execute\n").encode("utf-8"))
+        self.proc.stdin.flush()
+        ausgabe = []
+        while True:
+            try:
+                zeile = self.zeilen.get(timeout=self.ZEITLIMIT)
+            except queue.Empty:
+                self.schliessen(hart=True)  # hängt an dieser Datei: beim nächsten Bild neu starten
+                raise RuntimeError("exiftool reagiert nicht") from None
+            if zeile is None:
+                self.proc = None
+                raise RuntimeError("exiftool wurde unerwartet beendet: " + " ".join(ausgabe))
+            text = zeile.decode("utf-8", "replace").strip()
+            if text == "{ready}":
+                break
+            if text:
+                ausgabe.append(text)
+        meldung = " ".join(ausgabe)
+        if "Error" in meldung or "weren't updated" in meldung or "updated" not in meldung and "unchanged" not in meldung:
+            raise RuntimeError(meldung or "exiftool: keine Rückmeldung")
+
+    def schliessen(self, hart: bool = False):
+        proc, self.proc = self.proc, None
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            if not hart:
+                proc.stdin.write(b"-stay_open\nFalse\n")
+                proc.stdin.flush()
+                proc.wait(timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        if proc.poll() is None:
+            proc.kill()
+
+
+def _einbetten(datei: Path, a: Auftrag, sicherung: bool, exiftool: _Exiftool | None = None) -> None:
+    eigenes = exiftool is None
+    exiftool = exiftool or _Exiftool()
+    try:
+        exiftool.schreiben(_einbetten_argumente(datei, a, sicherung))
+    finally:
+        if eigenes:
+            exiftool.schliessen()
+
+
+def _sidecars(pfad: Path) -> list[Path]:
+    """Vorhandene XMP-Dateien zu einem Bild (Lightroom: IMG.xmp, andere: IMG.jpg.xmp)."""
+    kandidaten = [pfad.with_name(pfad.name + ".xmp")]
+    if pfad.suffix.lower() in RAW_ENDUNGEN:  # bei JPEG könnte IMG.xmp zur RAW-Datei daneben gehören
+        kandidaten += [pfad.with_suffix(".xmp"), pfad.with_suffix(".XMP")]
+    erg = []
+    for k in kandidaten:
+        if k.exists() and not any(k.samefile(e) for e in erg):
+            erg.append(k)
+    return erg
 
 
 def ausfuehren(auftraege: list[Auftrag], s: dict, protokoll_ordner: Path, echt: bool = False,
@@ -150,7 +250,7 @@ def ausfuehren(auftraege: list[Auftrag], s: dict, protokoll_ordner: Path, echt: 
     belegt: set[Path] = set()
     zaehler = {"ok": 0, "duplikat": 0, "fehlt": 0, "fehler": 0, "unveraendert": 0}
     vorschau, fehler, pfad_aenderungen = [], [], []
-    prot_datei = prot = None
+    prot_datei = prot = exif = None
     if echt:
         protokoll_ordner.mkdir(parents=True, exist_ok=True)
         prot_datei = protokoll_ordner / f"protokoll-{datetime.now():%Y%m%d-%H%M%S}.jsonl"
@@ -191,12 +291,20 @@ def ausfuehren(auftraege: list[Auftrag], s: dict, protokoll_ordner: Path, echt: 
                     shutil.copy2(a.pfad, neu)
                     schreibe({"op": "kopie", "quelle": str(a.pfad), "ziel": str(neu)})
                 elif neu != a.pfad:
+                    alte_xmp = _sidecars(a.pfad)
                     shutil.move(str(a.pfad), str(neu))
                     schreibe({"op": "verschoben", "quelle": str(a.pfad), "ziel": str(neu), "bild_id": a.bild_id})
                     pfad_aenderungen.append((a.bild_id, str(neu)))
+                    # vorhandene XMP-Dateien (z. B. Lightroom-Bearbeitungen) mitnehmen, sonst gehen sie verloren
+                    for x in alte_xmp:
+                        x_neu = neu.with_name(neu.name + ".xmp") if x.name.lower().endswith(
+                            a.pfad.name.lower() + ".xmp") else neu.with_suffix(x.suffix)
+                        if not x_neu.exists():
+                            shutil.move(str(x), str(x_neu))
+                            schreibe({"op": "verschoben", "quelle": str(x), "ziel": str(x_neu)})
                 art = tags_modus
-                if art == "einbetten" and neu.suffix.lower() in RAW_ENDUNGEN:
-                    art = "sidecar"  # RAW-Dateien nie direkt verändern
+                if art == "einbetten" and neu.suffix.lower() not in EINBETTEN_ENDUNGEN:
+                    art = "sidecar"  # RAW-Dateien nie direkt verändern; BMP u. a. kann exiftool nicht schreiben
                 if art == "sidecar":
                     xmp = neu.with_name(neu.name + ".xmp")
                     if not xmp.exists():
@@ -206,9 +314,14 @@ def ausfuehren(auftraege: list[Auftrag], s: dict, protokoll_ordner: Path, echt: 
                     sicherung = modus != "kopieren"  # Kopien dürfen direkt geändert werden
                     if sicherung and Path(str(neu) + "_original").exists():
                         raise RuntimeError("Sicherung von einem früheren Lauf vorhanden, bitte erst prüfen")
-                    _einbetten(neu, a, sicherung)
+                    if exif is None:
+                        exif = _Exiftool()
+                    _einbetten(neu, a, sicherung, exif)
                     if sicherung:
-                        schreibe({"op": "eingebettet", "ziel": str(neu), "sicherung": str(neu) + "_original"})
+                        schreibe({"op": "eingebettet", "ziel": str(neu), "sicherung": str(neu) + "_original",
+                                  "bild_id": a.bild_id})
+                        # Dateigröße hat sich geändert: Index nachführen, sonst wird neu analysiert
+                        pfad_aenderungen.append((a.bild_id, str(neu)))
                 zaehler["ok"] += 1
             except Exception as ex:
                 zaehler["fehler"] += 1
@@ -216,6 +329,8 @@ def ausfuehren(auftraege: list[Auftrag], s: dict, protokoll_ordner: Path, echt: 
     finally:
         if prot:
             prot.close()
+        if exif is not None:
+            exif.schliessen()
     return {"zaehler": zaehler, "vorschau": vorschau, "fehler": fehler[:100],
             "protokoll": str(prot_datei) if prot_datei else None, "pfad_aenderungen": pfad_aenderungen}
 
@@ -256,6 +371,7 @@ def rueckgaengig(protokoll: Path, echt: bool = False) -> dict:
                     schritte.append(f"Metadaten wiederherstellen: {ziel}")
                     if echt:
                         sicherung.replace(ziel)
+                        pfad_aenderungen.append((e.get("bild_id"), str(ziel)))
         except OSError as ex:
             probleme.append(f"Fehler {ziel}: {ex}")
     if echt:

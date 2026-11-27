@@ -73,8 +73,10 @@ _EXIF_DATUM = re.compile(r"(\d{4})[:\-](\d{2})[:\-](\d{2})[ T](\d{2}):(\d{2}):(\
 _NAME_MUSTER = [
     # IMG_20230514_123456, PXL_20230514_123456789, 20230514_123456
     re.compile(r"(?<!\d)(20\d{2}|19\d{2})(\d{2})(\d{2})[_\-T ]?(\d{2})(\d{2})(\d{2})"),
-    # 2023-05-14 12.34.56 / 2023-05-14_12-34-56
-    re.compile(r"(20\d{2}|19\d{2})-(\d{2})-(\d{2})[ _\-T](\d{2})[.\-:](\d{2})[.\-:](\d{2})"),
+    # 2023-05-14 12.34.56 / 2023-05-14_12-34-56 / "Bildschirmfoto 2023-05-14 um 12.34.56" (Mac) /
+    # "WhatsApp Image 2023-05-14 at 12.34.56" / "Screenshot 2023-05-14 123456" (Windows 11)
+    re.compile(r"(20\d{2}|19\d{2})-(\d{2})-(\d{2})(?:[ _\-T]|\s+(?:um|at)\s+)"
+               r"(\d{2})[.\-:]?(\d{2})[.\-:]?(\d{2})(?!\d)"),
     # IMG-20230514-WA0001 (WhatsApp, nur Tag)
     re.compile(r"(?<!\d)(20\d{2})(\d{2})(\d{2})(?!\d)"),
     re.compile(r"(20\d{2})-(\d{2})-(\d{2})"),
@@ -124,13 +126,17 @@ def lies_mit_exiftool(pfade: list[Path], stapel: int = 500) -> dict[Path, dict]:
     ergebnis: dict[Path, dict] = {}
     for i in range(0, len(pfade), stapel):
         teil = pfade[i:i + stapel]
-        cmd = ["exiftool", "-json", "-n", "-fast", "-charset", "filename=utf8",
+        cmd = [shutil.which("exiftool") or "exiftool", "-json", "-n", "-fast", "-charset", "filename=utf8",
                *_EXIF_FELDER, "-@", "-"]
         eingabe = "\n".join(str(p) for p in teil)
-        proc = subprocess.run(cmd, input=eingabe.encode("utf-8"), capture_output=True)
-        if not proc.stdout.strip():
-            continue
-        for eintrag in json.loads(proc.stdout.decode("utf-8", "replace")):
+        try:
+            # ohne CREATE_NO_WINDOW blitzt unter Windows bei jedem Stapel ein Konsolenfenster auf
+            proc = subprocess.run(cmd, input=eingabe.encode("utf-8"), capture_output=True,
+                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            eintraege = json.loads(proc.stdout.decode("utf-8", "replace")) if proc.stdout.strip() else []
+        except (OSError, ValueError):
+            continue  # Rest wird über Pillow gelesen
+        for eintrag in eintraege:
             ergebnis[Path(eintrag.get("SourceFile", ""))] = eintrag
     return ergebnis
 
