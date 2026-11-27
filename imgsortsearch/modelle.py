@@ -253,6 +253,61 @@ PROMPTS_KEIN_TEXT = [
 ]
 
 
+def einfache_attention_einsetzen(modul) -> int:
+    """Ersetzt nn.MultiheadAttention durch dieselbe Rechnung aus einfachen Grundoperationen.
+
+    torch-directml kennt den schnellen Sammel-Befehl ``_native_multi_head_attention`` nicht und rechnet
+    ihn auf dem Prozessor, mit Hin- und Herkopieren in jeder der 12 Schichten. Matrixprodukt und Softmax
+    kann DirectML dagegen. Gewichte bleiben dieselben, das Ergebnis ist identisch."""
+    import torch
+    from torch import nn
+
+    class EinfacheAttention(nn.Module):
+        def __init__(self, mha: nn.MultiheadAttention):
+            super().__init__()
+            self.mha = mha  # Gewichte unverändert übernehmen (state_dict-Schlüssel bleiben gleich + "mha.")
+            self.batch_first = mha.batch_first
+            self.heads = mha.num_heads
+
+        def forward(self, query, key=None, value=None, need_weights=False, attn_mask=None, **_):
+            m = self.mha
+            key = query if key is None else key
+            value = key if value is None else value
+            if not self.batch_first:  # (L, N, E) -> (N, L, E)
+                query, key, value = query.transpose(0, 1), key.transpose(0, 1), value.transpose(0, 1)
+            e = m.embed_dim
+            w, b = m.in_proj_weight, m.in_proj_bias
+            q = nn.functional.linear(query, w[:e], b[:e] if b is not None else None)
+            k = nn.functional.linear(key, w[e:2 * e], b[e:2 * e] if b is not None else None)
+            v = nn.functional.linear(value, w[2 * e:], b[2 * e:] if b is not None else None)
+            n, lq, _ = q.shape
+            lk = k.shape[1]
+            h, d = self.heads, e // self.heads
+            q = q.reshape(n, lq, h, d).transpose(1, 2)
+            k = k.reshape(n, lk, h, d).transpose(1, 2)
+            v = v.reshape(n, lk, h, d).transpose(1, 2)
+            gew = torch.matmul(q, k.transpose(-2, -1)) * (d ** -0.5)
+            if attn_mask is not None:
+                if attn_mask.dtype == torch.bool:
+                    gew = gew.masked_fill(attn_mask, float("-inf"))
+                else:
+                    gew = gew + attn_mask
+            gew = torch.softmax(gew, dim=-1)
+            out = torch.matmul(gew, v).transpose(1, 2).reshape(n, lq, e)
+            out = m.out_proj(out)
+            if not self.batch_first:
+                out = out.transpose(0, 1)
+            return out, None
+
+    n = 0
+    for name, kind in list(modul.named_modules()):
+        for attr, sub in list(kind.named_children()):
+            if isinstance(sub, nn.MultiheadAttention) and sub._qkv_same_embed_dim and sub.bias_k is None:
+                setattr(kind, attr, EinfacheAttention(sub))
+                n += 1
+    return n
+
+
 class ClipModell(_GeraetMitRueckfall):
     """Mehrsprachiges CLIP (versteht deutsche Suchbegriffe)."""
 
@@ -268,6 +323,9 @@ class ClipModell(_GeraetMitRueckfall):
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
             modell, pretrained=pretrained, cache_dir=str(modell_ordner() / "clip"))
         self.model.eval()
+        if "privateuseone" in str(self.geraet):  # DirectML
+            n = einfache_attention_einsetzen(self.model.visual)
+            log.info("DirectML: %d Attention-Schichten des Bildmodells ersetzt (sonst laufen sie auf dem Prozessor)", n)
         try:
             self.model = self.model.to(self.geraet)
         except Exception as e:
@@ -275,6 +333,24 @@ class ClipModell(_GeraetMitRueckfall):
         self.tokenizer = open_clip.get_tokenizer(modell, cache_dir=str(modell_ordner() / "clip"))
         self._text_cache: dict[str, np.ndarray] = {}
         self.kennung = f"{modell}/{pretrained}"
+        if str(self.geraet) != "cpu":
+            self._cpu_ausweich_ops_melden()
+
+    def _cpu_ausweich_ops_melden(self):
+        """Einmal ein Probebild rechnen und ins Log schreiben, welche Rechenschritte die Grafikkarte
+        nicht kann (DirectML weicht dann still auf den Prozessor aus, was sehr bremst)."""
+        import warnings
+        try:
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                self._bilder([Image.new("RGB", (224, 224), "gray")])
+            ops = sorted({str(x.message).split("'")[1] for x in w if "fall back" in str(x.message) and "'" in str(x.message)})
+            if ops:
+                log.warning("Bildmodell: diese Schritte laufen auf dem Prozessor statt der Grafikkarte: %s", ", ".join(ops))
+            else:
+                log.info("Bildmodell läuft vollständig auf der Grafikkarte (%s)", self.geraet_name)
+        except Exception as e:
+            log.info("Probelauf des Bildmodells nicht möglich: %s", e)
 
     def bilder(self, bilder: list[Image.Image]) -> np.ndarray:
         return self._mit_rueckfall(lambda: self._bilder(bilder))
@@ -348,6 +424,39 @@ def gesichtsmodelle_laden() -> tuple[Path, Path]:
     return ziele[0], ziele[1]
 
 
+def det_feste_groesse(quelle: Path, eingabe: int) -> Path:
+    """Gesichtsdetektor (SCRFD) mit fester Eingabegröße für DirectML.
+
+    Das Originalmodell hat eine variable Eingabegröße; die Vergrößerungen im Inneren (Resize) bekommen ihre
+    Zielgröße deshalb erst beim Rechnen ausgerechnet, und DirectML lehnt das ab ("Falscher Parameter").
+    Bei fester Größe ist jede dieser Vergrößerungen genau Faktor 2: als feste Skalierung eingetragen."""
+    import onnx
+    from onnx import helper, numpy_helper
+    ziel = quelle.with_name(f"{quelle.stem}_fest{eingabe}.onnx")
+    if ziel.exists() and ziel.stat().st_mtime >= quelle.stat().st_mtime:
+        return ziel
+    m = onnx.load(str(quelle))
+    dims = m.graph.input[0].type.tensor_type.shape.dim
+    dims[2].dim_value = eingabe
+    dims[3].dim_value = eingabe
+    leer = "fest_roi_leer"
+    faktor = "fest_skalierung_2"
+    m.graph.initializer.extend([numpy_helper.from_array(np.zeros(0, np.float32), leer),
+                                numpy_helper.from_array(np.array([1, 1, 2, 2], np.float32), faktor)])
+    geaendert = 0
+    for n in m.graph.node:
+        if n.op_type == "Resize" and len(n.input) == 4:
+            n.input[:] = [n.input[0], leer, faktor]
+            geaendert += 1
+    if not geaendert:
+        raise RuntimeError("keine Resize-Schicht gefunden")
+    tmp = ziel.with_name(ziel.name + ".part")
+    onnx.save(m, str(tmp))
+    tmp.replace(ziel)
+    log.info("Gesichtsdetektor mit fester Größe %d angelegt (%d Resize-Schichten)", eingabe, geaendert)
+    return ziel
+
+
 def _aehnlichkeits_transformation(quelle: np.ndarray, ziel: np.ndarray) -> np.ndarray:
     """Drehung + Skalierung + Verschiebung (Umeyama), die die Punkte quelle bestmöglich auf ziel legt. 2x3."""
     mq, mz = quelle.mean(0), ziel.mean(0)
@@ -414,9 +523,9 @@ class GesichtsModell:
             return
         self._sitzungen(["CPUExecutionProvider"])
 
-    def _sitzungen(self, anbieter: list) -> None:
+    def _sitzungen(self, anbieter: list, det: Path | None = None) -> None:
         import onnxruntime as ort
-        det, rec = self._dateien
+        det, rec = det or self._dateien[0], self._dateien[1]
         opt = ort.SessionOptions()
         opt.log_severity_level = 3
         if anbieter[0] == "CPUExecutionProvider":
@@ -436,9 +545,14 @@ class GesichtsModell:
             import onnxruntime as ort
             if "DmlExecutionProvider" not in ort.get_available_providers():
                 return False
+            try:
+                det_dml = det_feste_groesse(Path(self._dateien[0]), self.eingabe)
+            except Exception as e:
+                log.info("Gesichtsdetektor mit fester Größe nicht möglich (%s), versuche das Original", e)
+                det_dml = None
             for optionen in ({"performance_preference": "high_performance", "device_filter": "gpu"}, {}):
                 try:
-                    self._sitzungen([("DmlExecutionProvider", optionen), "CPUExecutionProvider"])
+                    self._sitzungen([("DmlExecutionProvider", optionen), "CPUExecutionProvider"], det_dml)
                     if self.det.get_providers()[0] == "DmlExecutionProvider":
                         break
                 except Exception as e:
