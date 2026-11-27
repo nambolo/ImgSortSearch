@@ -679,7 +679,14 @@ class ModellDownload:
             raise ValueError(f"Unbekanntes Modell: {modell}")
         with self._lock:
             if self._thread and self._thread.is_alive():
-                return False
+                if self.status.get("modell") == modell:
+                    return False
+                # anderes Modell gewählt: den laufenden Download anhalten (der Teil bleibt und wird
+                # später fortgesetzt) und das neu gewählte laden, sonst käme es nie an
+                self._stop.set()
+                self._thread.join(60)
+                if self._thread.is_alive():
+                    return False
             if ausfuehrlich_vorhanden(modell):
                 self.status.update(modell=modell, laeuft=False, abgeschlossen=True, fehler="")
                 return False
