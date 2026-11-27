@@ -296,18 +296,24 @@ class Indexer:
                        "meldung": "", "fehler": [], "start": None, "aktuell": None, "aktuell_pfad": ""}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._start_lock = threading.Lock()
+        self._zuletzt_aktiv: set[str] = set()
         self.nach_lauf = []  # Callbacks, z. B. Personen zuordnen
         self.nach_metadaten = []  # Callbacks nach dem Einlesen, z. B. Ortsnamen zu GPS-Daten
 
     # ---------------------------------------------------------- Steuerung
 
     def starten(self, schritte: set[str] | None = None) -> bool:
-        if self._thread and self._thread.is_alive():
-            return False
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._lauf, args=(schritte,), daemon=True)
-        self._thread.start()
-        return True
+        # Lock: zwei gleichzeitige Anfragen (Doppelklick, "Neu analysieren" während ein Download fertig wird)
+        # starteten sonst zwei Läufe nebeneinander, die dieselben Bilder doppelt bearbeiten
+        with self._start_lock:
+            if self._thread and self._thread.is_alive():
+                return False
+            self._stop.clear()
+            self.status["laeuft"] = True  # sofort, nicht erst wenn der Thread anläuft (Zurücksetzen prüft das)
+            self._thread = threading.Thread(target=self._lauf, args=(schritte,), daemon=True)
+            self._thread.start()
+            return True
 
     def stoppen(self) -> None:
         self._stop.set()
@@ -325,6 +331,14 @@ class Indexer:
                 cb()
             if not self._stop.is_set():
                 self.analysieren(schritte)
+            # Während des Laufs zum Neu-Analysieren vorgemerkte Bilder gleich mitnehmen,
+            # statt sie bis zum nächsten Indexlauf liegen zu lassen
+            for _ in range(3):
+                if self._stop.is_set() or not self._offen(self._zuletzt_aktiv or None):
+                    break
+                self.analysieren(schritte)
+            if not self._stop.is_set():
+                self.satzvektoren_nachtragen()
             if not self._stop.is_set() and self.e["beschreibung"]["ausfuehrlich"]["aktiv"]:
                 self.ausfuehrlich_beschreiben()
             self._setze(phase="einordnen", meldung="Bilder werden eingeordnet ...")
@@ -350,7 +364,8 @@ class Indexer:
         elif alt != kennung:
             log.info("Bildmodell gewechselt (%s -> %s), Bildvektoren werden neu berechnet", alt, kennung)
             with self.db.verbindung() as v:
-                v.execute("UPDATE bilder SET clip=NULL, schritt_clip=0")
+                # auch die Satzvektoren der ausführlichen Beschreibungen stammen vom Bildmodell (Textteil)
+                v.execute("UPDATE bilder SET clip=NULL, schritt_clip=0, beschreibung_lang_vek=NULL")
             self.db.meta_setzen("clip_kennung", kennung)
 
     # ---------------------------------------------------------- Schritt 1
@@ -455,6 +470,7 @@ class Indexer:
 
     def analysieren(self, schritte=None):
         aktiv = self._aktive_schritte()
+        self._zuletzt_aktiv = aktiv  # Schritte, die dieser Durchgang wirklich bearbeitet (ohne fehlende Modelle)
         offen = self._offen(aktiv)
         self._setze(phase="analyse", gesamt=len(offen), fertig=0,
                     meldung=f"Analysiere {len(offen)} Bilder (beim ersten Mal werden Modelle geladen) ...")
@@ -651,6 +667,35 @@ class Indexer:
         return self.db.eins("SELECT COUNT(*) AS n FROM bilder WHERE schritt_lang=0 AND schritt_clip=1 "
                             "AND fehler IS NULL")["n"]
 
+    def satzvektoren_nachtragen(self) -> int:
+        """Nach einem Wechsel des Bildmodells: Satzvektoren vorhandener ausführlicher Beschreibungen neu
+        berechnen (geht schnell, das Beschreibungsmodell wird dafür nicht gebraucht). Sonst fand die
+        Bedeutungssuche in den Beschreibungen nichts mehr oder verglich Vektoren zweier Modelle."""
+        offen = self.db.abfrage("SELECT id, beschreibung_lang FROM bilder WHERE beschreibung_lang_vek IS NULL "
+                                "AND beschreibung_lang IS NOT NULL AND beschreibung_lang != ''")
+        if not offen:
+            return 0
+        clip = self.m.clip()
+        if clip is None:
+            return 0
+        n = 0
+        for i in range(0, len(offen), 64):
+            if self._stop.is_set():
+                break
+            updates = []
+            for z in offen[i:i + 64]:
+                saetze = modelle.saetze_trennen(z["beschreibung_lang"])[:12]
+                if saetze:
+                    try:
+                        updates.append((saetze_zu_blob(clip.texte(saetze)), z["id"]))
+                    except Exception as ex:  # ein Fehler hier soll den Indexlauf nicht abbrechen
+                        self._fehler(f"Satzvektoren: {ex}")
+                        return n
+            with self.db.verbindung() as v:
+                v.executemany("UPDATE bilder SET beschreibung_lang_vek=? WHERE id=?", updates)
+            n += len(updates)
+        return n
+
     def ausfuehrlich_beschreiben(self):
         """Ausführliche Beschreibungen, als eigener Durchgang nach der normalen Analyse: so ist die Suche
         schnell fertig, und auf der Grafikkarte liegt nur dieses Modell neben dem Bildmodell."""
@@ -771,11 +816,17 @@ def _dauer_text(sek: float) -> str:
     return f"{sek / 3600:.1f} h"
 
 
+SATZZEICHEN = "\"'„“”‚‘’«»,;:!?()[]{}"
+
+
 def text_suche_bedingung(begriffe: str) -> tuple[str, list]:
     """SQL-Bedingung: alle Wörter müssen im Suchtext vorkommen."""
-    woerter = [w for w in normalisiere(begriffe).split() if w]
+    # Anführungszeichen und Satzzeichen am Wortrand ("„Rechnung“", "Müller,") gehören nicht zum Begriff;
+    # Punkte bleiben (Dateinamen wie "IMG_0001.jpg")
+    woerter = [w.strip(SATZZEICHEN) for w in normalisiere(begriffe).split()]
+    woerter = [w for w in woerter if w]
     if not woerter:
-        return "1=1", []
+        return ("0=1" if (begriffe or "").strip() else "1=1"), []  # nur Satzzeichen: nichts finden
     # _ und % sind in LIKE Platzhalter, in Dateinamen (IMG_2023) aber normale Zeichen
     maskiert = [w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") for w in woerter]
     return (" AND ".join("suchtext LIKE ? ESCAPE '\\'" for _ in woerter),

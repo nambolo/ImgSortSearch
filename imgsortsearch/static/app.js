@@ -183,7 +183,17 @@ async function ladeFilter() {
   o.hidden = !(f.laender || []).length;
 }
 
+function sortierungAnpassen() {
+  // "Beste Treffer zuerst" gibt es nur bei einer Suche; beim Start einer Suche ist es die Vorgabe
+  const s = $("#f-sort"), suche = !!($("#q").value.trim() || S.aehnlich), opt = s.querySelector('[value="relevanz"]');
+  if (suche && !opt.hidden) return;
+  opt.hidden = !suche;
+  if (suche && s.value === "datum_ab") s.value = "relevanz";
+  else if (!suche && s.value === "relevanz") s.value = "datum_ab";
+}
+
 function suchParameter(offset) {
+  sortierungAnpassen();
   const p = new URLSearchParams({
     q: $("#q").value, art: $("#art").value, kategorie: $("#f-kategorie").value, thema: $("#f-thema").value, jahr: $("#f-jahr").value,
     kamera: $("#f-kamera").value, ort: $("#f-ort").value, sortierung: $("#f-sort").value, offset, limit: 240,
@@ -209,7 +219,10 @@ async function suchen(weiter = false, behalten = false) {
     const r = await api("/api/bilder?" + suchParameter(offset));
     if (nr !== suchNr) return;
     S.gesamt = r.gesamt;
-    S.bilder = weiter ? S.bilder.concat(r.bilder) : r.bilder;
+    if (weiter) {  // läuft der Index nebenher, verschiebt sich die Liste: keine Bilder doppelt anzeigen
+      const schon = new Set(S.bilder.map((b) => b.id));
+      S.bilder = S.bilder.concat(r.bilder.filter((b) => !schon.has(b.id)));
+    } else S.bilder = r.bilder;
     const da = new Set(S.bilder.map((b) => b.id));
     if (!weiter && behalten) {
       S.gewaehlt = new Set([...S.gewaehlt].filter((i) => da.has(i)));
