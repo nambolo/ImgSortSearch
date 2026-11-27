@@ -262,6 +262,21 @@
         <div class="karte">
           <h2>Analyse</h2>
           <label class="schalter"><input type="checkbox" id="e-beschreibung"><span></span>Bildbeschreibungen erzeugen (gründlich, aber langsam)</label>
+          <label class="schalter"><input type="checkbox" id="e-lang"><span></span>Ausführliche Bildbeschreibungen (mehrere Sätze, sehr langsam)</label>
+          <div id="e-lang-box" class="einzug" hidden>
+            <div class="zeile"><div class="feld"><label>Modell</label>
+              <select id="e-lang-modell"><option value="microsoft/Florence-2-large">Florence-2 large: genauer (1,6 GB)</option>
+                <option value="microsoft/Florence-2-base">Florence-2 base: etwa 3× schneller (0,5 GB)</option></select></div>
+              <div class="feld"><label>Ausführlichkeit</label>
+              <select id="e-lang-stufe"><option value="sehr_detailliert">Sehr ausführlich (ein Absatz)</option>
+                <option value="detailliert">Ausführlich (2–3 Sätze, schneller)</option></select></div></div>
+            <div id="e-lang-download" hidden><div class="hinweis" id="e-lang-download-text"></div>
+              <div class="balken"><div id="e-lang-balken"></div></div>
+              <button class="knopf leicht" id="e-lang-abbrechen">Download abbrechen</button>
+              <button class="knopf leicht" id="e-lang-neu-laden" hidden>Erneut versuchen</button></div>
+            <p class="hinweis" id="e-lang-info"></p>
+            <button class="knopf leicht" id="e-lang-alle">Für alle Bilder neu erzeugen</button>
+          </div>
           <label class="schalter"><input type="checkbox" id="e-gesichter"><span></span>Gesichter erkennen (für die Personensuche)</label>
           <div class="feld"><label>Texterkennung (OCR)</label>
             <select id="e-ocr"><option value="text_bilder">Nur Bilder mit Text (Screenshots, Dokumente …)</option>
@@ -295,7 +310,7 @@
 
 <div class="vollbild" id="vollbild" hidden><img id="vollbild-img" alt=""><button class="zu" id="vollbild-zu">✕</button></div>
 <div class="dialog-huelle" id="dialog" hidden><div class="dialog"><h3 id="dialog-titel"></h3><div id="dialog-text"></div>
-  <div class="zeile rechts"><button class="knopf leicht" id="dialog-nein">Abbrechen</button><button class="knopf" id="dialog-drittes" hidden></button><button class="knopf primaer" id="dialog-ja">OK</button></div></div></div>
+  <div class="zeile rechts"><button class="knopf leicht" id="dialog-nein">Abbrechen</button><button class="knopf" id="dialog-viertes" hidden></button><button class="knopf" id="dialog-drittes" hidden></button><button class="knopf primaer" id="dialog-ja">OK</button></div></div></div>
 <div class="toast" id="toast"></div>
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/leaflet.markercluster.js"></script>

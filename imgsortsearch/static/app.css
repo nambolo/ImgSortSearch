@@ -294,3 +294,6 @@ main { min-width: 0; min-height: 0; position: relative; }
 .gesicht .lupe { position: absolute; right: 4px; bottom: 4px; border: 0; border-radius: 6px; background: rgba(0,0,0,.55); color: #fff; padding: 1px 6px; cursor: zoom-in; opacity: 0; }
 .gesicht:hover .lupe { opacity: 1; }
 .pd-aktionen { flex-wrap: wrap; gap: 8px; align-items: center; }
+.einzug { margin: 2px 0 10px 12px; padding-left: 12px; border-left: 2px solid var(--bg2); display: flex; flex-direction: column; gap: 8px; }
+.lang-beschreibung { line-height: 1.45; }
+.lang-beschreibung .hinweis { display: block; margin-bottom: 2px; }

@@ -91,6 +91,7 @@ Grobe Werte für 10.000 Bilder auf einem normalen PC ohne Grafikkarte:
 | Gesichter | ca. 30 min |
 | Texterkennung (nur Bilder mit Text) | je nach Anteil |
 | Bildbeschreibungen | mehrere Stunden (in den Einstellungen abschaltbar) |
+| Ausführliche Beschreibungen (optional) | Florence-2 large: ca. 6–10 h mit Grafikkarte (RX 5600 XT), base etwa ein Drittel; ohne Grafikkarte etwa 8-mal so lange |
 
 Mit Grafikkarte geht es deutlich schneller. Der Lauf kann jederzeit angehalten und später fortgesetzt werden.
 
@@ -100,6 +101,7 @@ Mit Grafikkarte geht es deutlich schneller. Der Lauf kann jederzeit angehalten u
 |---|---|
 | Bildinhalt, Bedeutungssuche (versteht Deutsch) | CLIP `xlm-roberta-base-ViT-B-32` (LAION, open_clip) |
 | Bildbeschreibung | BLIP `Salesforce/blip-image-captioning-base`, übersetzt mit `Helsinki-NLP/opus-mt-en-de` |
+| Ausführliche Beschreibung (optional, Standard aus) | Florence-2 `microsoft/Florence-2-large` oder `-base` (MIT-Lizenz), übersetzt mit Marian. Wird erst geladen, wenn man die Option in den Einstellungen einschaltet (1,6 GB bzw. 0,5 GB, nach `daten/modelle/ausfuehrlich`). Auf der Grafikkarte in halber Genauigkeit, ca. 1,6 GB Grafikspeicher |
 | Gesichter | InsightFace buffalo_l: SCRFD-10G (Erkennung, 5 Merkmalspunkte) + ArcFace R50/WebFace600K (Wiedererkennung), über onnxruntime. Modelllizenz: nur nicht-kommerziell |
 | Texterkennung | Windows-Texterkennung (Deutsch), sonst RapidOCR |
 

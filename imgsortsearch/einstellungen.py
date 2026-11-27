@@ -46,6 +46,16 @@ STANDARD = {
         "aktiv": True,
         "modell": "Salesforce/blip-image-captioning-base",
         "uebersetzer": "Helsinki-NLP/opus-mt-en-de",   # leer = englisch lassen
+        # Ausführliche Beschreibungen (mehrere Sätze). Aus: das Modell wird erst geladen, wenn man es einschaltet.
+        "ausfuehrlich": {
+            "aktiv": False,
+            "modell": "microsoft/Florence-2-large",     # oder microsoft/Florence-2-base (ca. 3x schneller)
+            "stufe": "sehr_detailliert",                # detailliert (2-3 Sätze) | sehr_detailliert (Absatz)
+            "genauigkeit": "auto",                      # auto (Grafikkarte: halbe) | fp16 | fp32
+            "strahlen": 3,                              # Suchbreite beim Formulieren: 1 = schneller, 3 = besser
+            "stapel": 2,
+            "such_strenge": 3.0,                        # Bedeutungssuche: so weit über dem Durchschnitt (Std.-Abw.)
+        },
     },
     "gesichter": {"aktiv": True, "min_groesse": 40},  # Schwellen: siehe personen.STANDARD (überschreibbar)
     "clip": {

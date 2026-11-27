@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from . import metadata, modelle, personen
-from .datenbank import Datenbank, normalisiere, vektor_zu_blob
+from .datenbank import Datenbank, normalisiere, saetze_zu_blob, vektor_zu_blob
 from .einstellungen import Einstellungen, daten_ordner
 from .klassifizierung import Themen, einordnen, thema_prompt, zusatz_kategorien
 
@@ -98,7 +98,8 @@ class Modelle:
 
     def __init__(self, e: Einstellungen):
         self.e = e
-        self._clip = self._gesichter = self._ocr = self._beschreiber = None
+        self._clip = self._gesichter = self._ocr = self._beschreiber = self._ausfuehrlich = None
+        self.download = modelle.ModellDownload()  # ausführliches Modell erst laden, wenn es gewählt wird
         self._lock = threading.Lock()
         self.fehler: dict[str, str] = {}
         self._geladen_mit: dict[str, tuple] = {}  # Einstellungen, mit denen ein Modell geladen wurde
@@ -140,6 +141,15 @@ class Modelle:
         return self._laden("beschreiber", (b["modell"], b.get("uebersetzer", ""), beschl),
                            lambda: modelle.Beschreiber(b["modell"], b.get("uebersetzer", ""), beschl))
 
+    def ausfuehrlich(self):
+        a, b = self.e["beschreibung"]["ausfuehrlich"], self.e["beschreibung"]
+        beschl = self.e.get("beschleunigung", "auto")
+        schluessel = (a["modell"], a["stufe"], b.get("uebersetzer", ""), beschl, a.get("genauigkeit", "auto"),
+                      int(a.get("strahlen", 3)))
+        if not modelle.ausfuehrlich_vorhanden(a["modell"]):
+            return None
+        return self._laden("ausfuehrlich", schluessel, lambda: modelle.AusfuehrlicherBeschreiber(*schluessel))
+
     def clip_falls_geladen(self):
         """Das Bildmodell, falls es schon geladen ist und noch zu den Einstellungen passt."""
         c = self.e["clip"]
@@ -151,7 +161,7 @@ class Modelle:
     def geraete(self) -> dict:
         """Welche Modelle gerade auf welchem Gerät laufen."""
         erg = {}
-        for name in ("clip", "beschreiber"):
+        for name in ("clip", "beschreiber", "ausfuehrlich"):
             m = getattr(self, f"_{name}")
             if m is not None and hasattr(m, "geraet_name"):
                 erg[name] = m.geraet_name
@@ -161,7 +171,7 @@ class Modelle:
         """Modelle freigeben, damit sie beim nächsten Gebrauch neu geladen werden
         (anderes Gerät oder anderes Modell). Ohne Namen: Bildmodell und Beschreiber."""
         with self._lock:
-            for name in namen or ("clip", "beschreiber"):
+            for name in namen or ("clip", "beschreiber", "ausfuehrlich"):
                 setattr(self, f"_{name}", None)
                 self.fehler.pop(name, None)
                 self._geladen_mit.pop(name, None)
@@ -261,6 +271,8 @@ class Indexer:
                 cb()
             if not self._stop.is_set():
                 self.analysieren(schritte)
+            if not self._stop.is_set() and self.e["beschreibung"]["ausfuehrlich"]["aktiv"]:
+                self.ausfuehrlich_beschreiben()
             self._setze(phase="einordnen", meldung="Bilder werden eingeordnet ...")
             alle_neu_einordnen(self.db, self.e, self.m)
             for cb in self.nach_lauf:
@@ -349,7 +361,7 @@ class Indexer:
                               modell=excluded.modell, kamera=excluded.kamera, gps_lat=excluded.gps_lat,
                               gps_lon=excluded.gps_lon, breite=excluded.breite, hoehe=excluded.hoehe,
                               schlagwoerter=excluded.schlagwoerter, clip=NULL, schritt_clip=0, schritt_ocr=0,
-                              schritt_gesichter=0, schritt_beschreibung=0, fehler=NULL""",
+                              schritt_gesichter=0, schritt_beschreibung=0, schritt_lang=0, fehler=NULL""",
                                   (str(info.pfad), st.st_size, st.st_mtime,
                                    info.datum.isoformat(sep=" ") if info.datum else None, info.datum_quelle,
                                    info.hersteller, info.modell, info.kamera, info.gps_lat, info.gps_lon,
@@ -494,6 +506,84 @@ class Indexer:
             rest = (len(offen) - erledigt) * dauer / max(1, erledigt)
             self._setze(fertig=min(len(offen), i + len(teil)),
                         meldung=f"Analysiere Bilder ... noch etwa {_dauer_text(rest)}")
+
+    # ---------------------------------------------------------- Schritt 3 (optional)
+
+    def offen_lang(self) -> int:
+        return self.db.eins("SELECT COUNT(*) AS n FROM bilder WHERE schritt_lang=0 AND schritt_clip=1 "
+                            "AND fehler IS NULL")["n"]
+
+    def ausfuehrlich_beschreiben(self):
+        """Ausführliche Beschreibungen, als eigener Durchgang nach der normalen Analyse: so ist die Suche
+        schnell fertig, und auf der Grafikkarte liegt nur dieses Modell neben dem Bildmodell."""
+        a = self.e["beschreibung"]["ausfuehrlich"]
+        offen = self.db.abfrage("SELECT id, pfad FROM bilder WHERE schritt_lang=0 AND schritt_clip=1 "
+                                "AND fehler IS NULL ORDER BY datum DESC")
+        if not offen:
+            return
+        if not modelle.ausfuehrlich_vorhanden(a["modell"]):
+            gestartet = self.m.download.starten(a["modell"])
+            self._fehler("Ausführliche Beschreibungen: das Modell wird noch heruntergeladen"
+                         + (" (gerade gestartet)" if gestartet else "") + ". Danach geht es von selbst weiter.")
+            return
+        self.m.entladen("beschreiber")  # kurzes Beschreibungsmodell freigeben: Platz auf der Grafikkarte
+        self._setze(phase="beschreibung_lang", gesamt=len(offen), fertig=0,
+                    meldung=f"Ausführliche Beschreibungen für {len(offen)} Bilder: Modell wird geladen ...")
+        besch = self.m.ausfuehrlich()
+        if besch is None:
+            self._fehler(f"Ausführliche Beschreibungen übersprungen: {self.m.fehler.get('ausfuehrlich')}")
+            return
+        clip = self.m.clip()
+        kennung = f"{a['modell']}/{a['stufe']}"
+        stapel = max(1, int(a.get("stapel", 2)))
+        t0, erledigt, fehlversuche = time.time(), 0, 0
+        try:
+            for i in range(0, len(offen), stapel):
+                if self._stop.is_set():
+                    return
+                teil, geladen = offen[i:i + stapel], []
+                for z in teil:
+                    try:
+                        geladen.append((z, modelle.bild_laden(Path(z["pfad"]), max_kante=1024)))
+                        self._setze(aktuell=z["id"], aktuell_pfad=z["pfad"])
+                    except Exception as ex:  # Datei weg oder kaputt: nicht bei jedem Lauf neu versuchen
+                        self._fehler(f"Ausführliche Beschreibung {Path(z['pfad']).name}: {ex}")
+                        with self.db.verbindung() as v:
+                            v.execute("UPDATE bilder SET schritt_lang=1 WHERE id=?", (z["id"],))
+                if not geladen:
+                    continue
+                try:
+                    texte = besch.beschreiben([img for _, img in geladen])
+                except Exception as ex:
+                    self._fehler(f"Ausführliche Beschreibung: {ex}")
+                    fehlversuche += 1
+                    if fehlversuche >= 3:  # Modell läuft gar nicht: nicht 10.000 Bilder lang probieren
+                        self._fehler("Ausführliche Beschreibungen angehalten (3 Fehler nacheinander).")
+                        return
+                    continue
+                fehlversuche = 0
+                for (z, _), (de, en, saetze) in zip(geladen, texte):
+                    vek = None
+                    if clip is not None and saetze:
+                        try:
+                            vek = saetze_zu_blob(clip.texte(saetze[:12]))
+                        except Exception as ex:
+                            self._fehler(f"Satzvektoren: {ex}")
+                    with self.db.verbindung() as v:
+                        v.execute("UPDATE bilder SET beschreibung_lang=?, beschreibung_lang_en=?, "
+                                  "beschreibung_lang_vek=?, beschreibung_lang_modell=?, schritt_lang=1 WHERE id=?",
+                                  (de, en, vek, kennung, z["id"]))
+                    self.db.suchtext_aktualisieren(z["id"])
+                    erledigt += 1
+                dauer = time.time() - t0
+                je_bild = dauer / max(1, erledigt)
+                if erledigt >= 3:
+                    self.db.meta_setzen("lang_sek_pro_bild", f"{je_bild:.2f}")
+                self._setze(fertig=min(len(offen), i + len(teil)),
+                            meldung=f"Ausführliche Beschreibungen ({je_bild:.1f} s je Bild auf "
+                                    f"{besch.geraet_name}) ... noch etwa {_dauer_text((len(offen) - erledigt) * je_bild)}")
+        finally:
+            self.m.entladen("ausfuehrlich")  # Grafikspeicher wieder freigeben
 
     def _gesichter_speichern(self, bild_id: int, gef: list[dict], bw: int, bh: int, kennung: str) -> None:
         """Ersetzt die Gesichter eines Bildes. Was der Nutzer an derselben Stelle festgelegt hat

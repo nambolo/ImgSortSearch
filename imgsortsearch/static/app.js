@@ -27,22 +27,25 @@ function toast(text, fehler = false) {
 }
 
 // Liefert true (Ja), false (Abbrechen) oder "drittes", wenn ein dritter Knopf angegeben ist
-function frage(titel, html, jaText = "OK", drittesText = "") {
+function frage(titel, html, jaText = "OK", drittesText = "", viertesText = "") {
   return new Promise((ok) => {
     $("#dialog-titel").textContent = titel;
     $("#dialog-text").innerHTML = html;
     $("#dialog-ja").textContent = jaText;
     $("#dialog-drittes").textContent = drittesText;
     $("#dialog-drittes").hidden = !drittesText;
+    $("#dialog-viertes").textContent = viertesText;
+    $("#dialog-viertes").hidden = !viertesText;
     $("#dialog").hidden = false;
     const fertig = (w) => {
       $("#dialog").hidden = true;
-      $("#dialog-ja").onclick = $("#dialog-nein").onclick = $("#dialog-drittes").onclick = null;
+      $("#dialog-ja").onclick = $("#dialog-nein").onclick = $("#dialog-drittes").onclick = $("#dialog-viertes").onclick = null;
       ok(w);
     };
     $("#dialog-ja").onclick = () => fertig(true);
     $("#dialog-nein").onclick = () => fertig(false);
     $("#dialog-drittes").onclick = () => fertig("drittes");
+    $("#dialog-viertes").onclick = () => fertig("viertes");
   });
 }
 
@@ -77,20 +80,22 @@ async function status() {
     const i = s.index;
     const knopf = $("#index-knopf");
     if (!i.laeuft) S.wirdAngehalten = false;
-    const fortsetzen = i.phase === "angehalten" && s.offen > 0;
+    const offenLang = s.ausfuehrlich && s.ausfuehrlich.aktiv ? s.ausfuehrlich.offen : 0;
+    const fortsetzen = i.phase === "angehalten" && (s.offen > 0 || offenLang > 0);
     knopf.textContent = i.laeuft ? (S.wirdAngehalten ? "Wird angehalten …" : "Anhalten")
       : (fortsetzen ? "Fortsetzen" : (s.gesamt ? "Index aktualisieren" : "Index erstellen"));
     knopf.disabled = i.laeuft && S.wirdAngehalten;
     knopf.classList.toggle("primaer", !i.laeuft);
-    $("#index-phase").textContent = { suchen: "Suche Dateien", metadaten: "Metadaten", analyse: "Analyse", einordnen: "Einordnen", fertig: "Index", angehalten: "Angehalten", fehler: "Fehler", bereit: "Index" }[i.phase] || "Index";
+    $("#index-phase").textContent = { suchen: "Suche Dateien", metadaten: "Metadaten", analyse: "Analyse", beschreibung_lang: "Beschreibungen", einordnen: "Einordnen", fertig: "Index", angehalten: "Angehalten", fehler: "Fehler", bereit: "Index" }[i.phase] || "Index";
     $("#index-zahl").textContent = i.laeuft && i.gesamt ? `${i.fertig.toLocaleString("de")} / ${i.gesamt.toLocaleString("de")}` : `${s.gesamt.toLocaleString("de")} Bilder`;
     $("#index-balken").style.width = i.gesamt ? `${(100 * i.fertig) / i.gesamt}%` : (i.laeuft ? "5%" : "0");
-    const meldung = i.phase === "angehalten" && s.offen ? `Angehalten. ${s.offen.toLocaleString("de")} Bilder noch nicht analysiert.` : i.meldung;
+    const meldung = i.phase === "angehalten" && s.offen ? `Angehalten. ${s.offen.toLocaleString("de")} Bilder noch nicht analysiert.`
+      : (i.phase === "angehalten" && offenLang ? `Angehalten. ${offenLang.toLocaleString("de")} Bilder noch ohne ausführliche Beschreibung.` : i.meldung);
     const fehlen = (s.quellen_fehlen || []).length ? ` ${s.quellen_fehlen.length} Bilder-Ordner nicht gefunden.` : "";
     $("#index-meldung").textContent = (meldung || (s.offen ? `${s.offen.toLocaleString("de")} Bilder noch nicht analysiert.` : (s.gesamt ? "Index ist aktuell." : "Noch kein Index erstellt."))) + fehlen;
     S.quellenFehlen = s.quellen_fehlen || [];
     const bild = $("#index-bild");
-    bild.classList.toggle("laeuft", i.laeuft && i.phase === "analyse");
+    bild.classList.toggle("laeuft", i.laeuft && (i.phase === "analyse" || i.phase === "beschreibung_lang"));
     if (i.laeuft && i.aktuell && i.aktuell !== letzteAktuell) {
       letzteAktuell = i.aktuell;
       bild.style.backgroundImage = `url(/api/vorschau/${i.aktuell})`;
@@ -114,6 +119,7 @@ async function status() {
     if (S.indexLief && !i.laeuft) { if (!S.bildSuche) suchen(false, true); ladeFilter(); }
     S.indexLief = i.laeuft;
     $("#e-status").innerHTML = statusText(s);
+    zeigeAusfuehrlich(s.ausfuehrlich);
   } catch (e) { /* Server startet noch */ }
   statusTimer = setTimeout(status, S.indexLief ? 1000 : 2500);
 }
@@ -323,17 +329,19 @@ async function zusatzSetzen(ids, kat, an) {
 }
 
 async function neuBewerten(ids) {
+  const lang = !!(S.einst.beschreibung.ausfuehrlich && S.einst.beschreibung.ausfuehrlich.aktiv);
   const w = await frage("Neu bewerten",
     `<p>${ids.length.toLocaleString("de-DE")} Bild(er) neu bewerten.</p>
      <p><b>Neu einordnen</b> wendet Themen, Uhrzeit und Regeln erneut an. Das geht in Sekunden.</p>
+     ${lang ? `<p><b>Beschreibung neu</b> erzeugt nur die ausführliche Beschreibung noch einmal (z. B. nach einem Modellwechsel). Alles andere bleibt.</p>` : ""}
      <p><b>Komplett neu analysieren</b> erkennt Bildinhalt, Gesichter und Text noch einmal. Das dauert je Bild etwas.</p>
-     <p>Kategorien, die du von Hand gesetzt hast, bleiben in beiden Fällen erhalten.</p>`,
-    "Komplett neu analysieren", "Neu einordnen");
+     <p>Kategorien, die du von Hand gesetzt hast, bleiben in allen Fällen erhalten.</p>`,
+    "Komplett neu analysieren", "Neu einordnen", lang ? "Beschreibung neu" : "");
   if (w === false) return;
   try {
-    if (w === true) {
-      const r = await api("/api/bilder/neu-analysieren", { json: { ids } });
-      toast(r.gestartet ? `${r.vorgemerkt} Bild(er) werden neu analysiert …` : `${r.vorgemerkt} Bild(er) vorgemerkt. Sie kommen im nächsten Indexlauf dran.`);
+    if (w === true || w === "viertes") {
+      const r = await api(w === true ? "/api/bilder/neu-analysieren" : "/api/bilder/neu-beschreiben", { json: { ids } });
+      toast(r.gestartet ? `${r.vorgemerkt} Bild(er) werden neu bearbeitet …` : `${r.vorgemerkt} Bild(er) vorgemerkt. Sie kommen im nächsten Indexlauf dran.`);
     } else {
       await api("/api/einordnen", { method: "POST" });
       toast("Neu eingeordnet");
@@ -343,6 +351,74 @@ async function neuBewerten(ids) {
   } catch (e) { toast(e.message, true); }
 }
 $("#auswahl-neu").onclick = () => neuBewerten([...S.gewaehlt]);
+
+/* ------------------------------------------------------------ Ausführliche Beschreibungen */
+
+// Grobe Schätzung je Bild (Sekunden) auf einer Mittelklasse-Grafikkarte wie der RX 5600 XT;
+// der Prozessor braucht etwa 8-mal so lange. Nach den ersten Bildern zeigt das Programm den gemessenen Wert.
+const LANG_SEK = { "microsoft/Florence-2-large": { sehr_detailliert: 3, detailliert: 2 },
+                   "microsoft/Florence-2-base": { sehr_detailliert: 1.1, detailliert: 0.8 } };
+function dauerText(sek) {
+  if (sek < 90) return `${Math.round(sek)} Sekunden`;
+  if (sek < 5400) return `${Math.round(sek / 60)} Minuten`;
+  if (sek < 172800) return `${(sek / 3600).toLocaleString("de", { maximumFractionDigits: 1 })} Stunden`;
+  return `${(sek / 86400).toLocaleString("de", { maximumFractionDigits: 1 })} Tage`;
+}
+function zeigeAusfuehrlich(a) {
+  if (!a) return;
+  const box = $("#e-lang-box");
+  box.hidden = !$("#e-lang").checked;
+  const d = a.download || {};
+  const zeigeDl = d.laeuft || (d.fehler && d.modell === a.modell && !a.vorhanden);
+  $("#e-lang-download").hidden = !zeigeDl;
+  if (zeigeDl) {
+    const mb = (x) => Math.round(x / 1048576).toLocaleString("de");
+    $("#e-lang-download-text").textContent = d.laeuft
+      ? `Modell wird heruntergeladen: ${mb(d.fertig)} von ${d.gesamt ? mb(d.gesamt) : "?"} MB`
+      : `Download ${d.fehler === "abgebrochen" ? "abgebrochen" : `fehlgeschlagen: ${d.fehler}`}. Bereits Geladenes bleibt und wird beim nächsten Versuch fortgesetzt.`;
+    $("#e-lang-balken").style.width = d.gesamt ? `${(100 * d.fertig) / d.gesamt}%` : "3%";
+    $("#e-lang-abbrechen").hidden = !d.laeuft;
+    $("#e-lang-neu-laden").hidden = !!d.laeuft;
+  }
+  const n = a.offen + a.fertig;
+  const stufe = $("#e-lang-stufe").value;
+  const geschaetzt = (LANG_SEK[a.modell] || {})[stufe] || 3;
+  const je = a.sek_pro_bild || geschaetzt;
+  const teile = [];
+  if (!a.vorhanden && !d.laeuft) teile.push("Das Modell wird beim Einschalten einmalig in den Datenordner geladen, danach geht alles offline.");
+  if (a.fertig) teile.push(`${a.fertig.toLocaleString("de")} Bilder haben eine ausführliche Beschreibung.`);
+  if (a.offen) teile.push(`Für die übrigen ${a.offen.toLocaleString("de")} Bilder braucht es etwa ${dauerText(a.offen * je)}`
+    + (a.sek_pro_bild ? ` (gemessen: ${je.toLocaleString("de", { maximumFractionDigits: 1 })} s je Bild).` : ` mit der Grafikkarte (Schätzung, ohne Grafikkarte etwa 8-mal so lange).`));
+  else if (!n) teile.push(`Richtwert: 10.000 Bilder brauchen mit der Grafikkarte etwa ${dauerText(10000 * geschaetzt)}.`);
+  teile.push("Läuft nach der normalen Analyse, lässt sich jederzeit anhalten und später fortsetzen.");
+  $("#e-lang-info").textContent = teile.join(" ");
+  $("#e-lang-alle").hidden = !a.vorhanden || !a.fertig;
+}
+async function langSpeichern() {
+  try {
+    S.einst = await api("/api/einstellungen", { json: { beschreibung: { ausfuehrlich: {
+      aktiv: $("#e-lang").checked, modell: $("#e-lang-modell").value, stufe: $("#e-lang-stufe").value } } } });
+    $("#e-lang-box").hidden = !$("#e-lang").checked;
+    status();
+  } catch (e) { toast(e.message, true); }
+}
+// Gleich speichern: das Modell soll erst geladen werden, wenn man es hier auswählt
+$("#e-lang").onchange = langSpeichern;
+$("#e-lang-modell").onchange = langSpeichern;
+$("#e-lang-stufe").onchange = langSpeichern;
+$("#e-lang-abbrechen").onclick = async () => { try { await api("/api/ausfuehrlich/abbrechen", { method: "POST" }); status(); } catch (e) { toast(e.message, true); } };
+$("#e-lang-neu-laden").onclick = async () => { try { await api("/api/ausfuehrlich/download", { method: "POST" }); status(); } catch (e) { toast(e.message, true); } };
+$("#e-lang-alle").onclick = async () => {
+  const w = await frage("Beschreibungen neu erzeugen",
+    `<p>Alle ausführlichen Beschreibungen werden mit den aktuellen Einstellungen neu erzeugt. Das dauert wieder so lange wie beim ersten Mal.
+     Bildinhalt, Gesichter, Text und Kategorien bleiben, wie sie sind.</p>`, "Neu erzeugen");
+  if (w !== true) return;
+  try {
+    const r = await api("/api/bilder/neu-beschreiben", { json: { alle: true } });
+    toast(r.gestartet ? "Beschreibungen werden neu erzeugt …" : "Vorgemerkt für den nächsten Indexlauf");
+    status();
+  } catch (e) { toast(e.message, true); }
+};
 
 $("#raster").addEventListener("click", (e) => { const k = e.target.closest(".kachel"); if (k) waehle(+k.dataset.id, e); });
 $("#raster").addEventListener("dblclick", (e) => { const k = e.target.closest(".kachel"); if (k) { setzeModus("liste"); S.fokus = +k.dataset.id; zeichneErgebnis(); zeigeDetail(S.fokus); scrolleZuFokus(); } });
@@ -406,6 +482,7 @@ async function zeigeDetail(id) {
             style="${an ? `background:${farbe(k)}` : `border-color:${farbe(k)}`}">${an ? "✓ " : "+ "}${esc(k)}</button>`;
         }).join("")}</div>` : ""}
         ${b.beschreibung ? `<div>${esc(b.beschreibung)}</div>` : ""}
+        ${b.beschreibung_lang ? `<div class="lang-beschreibung" title="${esc(b.beschreibung_lang_en || "")}"><span class="hinweis">Ausführliche Beschreibung</span>${esc(b.beschreibung_lang)}</div>` : ""}
         ${b.tags ? `<div class="tags">${b.tags.split(",").map((t) => `<span class="tag">${esc(t.trim())}</span>`).join("")}</div>` : ""}
         <dl class="meta">
           <dt>Aufgenommen</dt><dd>${esc(datumText(b.datum))} <span class="hinweis">(${esc(b.datum_quelle || "")})</span></dd>
@@ -1013,6 +1090,11 @@ function ladeEinstellungen() {
   $("#e-az-kat").innerHTML = opt(az.kategorie);
   $("#e-fz-kat").innerHTML = opt(az.kategorie_freizeit);
   $("#e-beschreibung").checked = e.beschreibung.aktiv;
+  const lang = e.beschreibung.ausfuehrlich || {};
+  $("#e-lang").checked = !!lang.aktiv;
+  $("#e-lang-modell").value = lang.modell || "microsoft/Florence-2-large";
+  $("#e-lang-stufe").value = lang.stufe || "sehr_detailliert";
+  $("#e-lang-box").hidden = !lang.aktiv;
   $("#e-gesichter").checked = e.gesichter.aktiv;
   $("#e-ocr").value = e.ocr.modus;
   $("#e-beschl").value = e.beschleunigung || "auto";
@@ -1092,7 +1174,8 @@ $("#e-speichern").onclick = async () => {
       von: $("#e-von").value || "07:30", bis: $("#e-bis").value || "17:30",
       kategorie: $("#e-az-kat").value, kategorie_freizeit: $("#e-fz-kat").value,
     },
-    beschreibung: { aktiv: $("#e-beschreibung").checked },
+    beschreibung: { aktiv: $("#e-beschreibung").checked, ausfuehrlich: { aktiv: $("#e-lang").checked,
+      modell: $("#e-lang-modell").value, stufe: $("#e-lang-stufe").value } },
     gesichter: { aktiv: $("#e-gesichter").checked },
     ocr: { modus: $("#e-ocr").value },
     beschleunigung: $("#e-beschl").value,

@@ -34,6 +34,7 @@ class Zustand:
         self.m = Modelle(self.e)
         self.indexer = Indexer(self.db, self.e, self.m)
         self.indexer.nach_lauf.append(self._personen_zuordnen)
+        self.m.download.nach_download.append(self._nach_download)
         # neues Gesichtsmodell: nur den Gesichtsschritt neu einplanen, der Rest des Index bleibt
         if personen.modellwechsel_pruefen(self.db):
             log.info("Gesichtsmodell gewechselt, Gesichter werden beim nächsten Indexlauf neu erkannt")
@@ -52,6 +53,20 @@ class Zustand:
             orte.orte_zuordnen(self.db)
         except Exception:
             log.exception("Ortsnamen zuordnen fehlgeschlagen")
+
+    def _nach_download(self, modell: str):
+        """Modell für ausführliche Beschreibungen ist da: gleich loslegen, falls es noch gewählt ist."""
+        a = self.e["beschreibung"]["ausfuehrlich"]
+        if a["aktiv"] and a["modell"] == modell and self.e["quellen"] and self.indexer.offen_lang():
+            self.indexer.starten()
+
+    def ausfuehrlich_info(self) -> dict:
+        a = self.e["beschreibung"]["ausfuehrlich"]
+        sek = self.db.meta("lang_sek_pro_bild")
+        return {"aktiv": a["aktiv"], "modell": a["modell"], "vorhanden": modelle.ausfuehrlich_vorhanden(a["modell"]),
+                "offen": self.indexer.offen_lang(),
+                "fertig": self.db.eins("SELECT COUNT(*) AS n FROM bilder WHERE beschreibung_lang IS NOT NULL")["n"],
+                "sek_pro_bild": float(sek) if sek else None, "download": self.m.download.status}
 
     def _personen_zuordnen(self):
         self.indexer.status["meldung"] = "Gesichter werden Personen zugeordnet ..."
@@ -102,7 +117,7 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
         offen = z.db.eins("SELECT COUNT(*) AS n FROM bilder WHERE schritt_clip=0 AND fehler IS NULL")["n"]
         return {"index": z.indexer.status, "kategorien": zahlen, "gesamt": gesamt,
                 "offen": offen, "modell_fehler": z.m.fehler, "geraete": z.m.geraete(), "exiftool": shutil.which("exiftool") is not None,
-                "sortieren": z.sortier_status,
+                "sortieren": z.sortier_status, "ausfuehrlich": z.ausfuehrlich_info(),
                 "quellen_fehlen": [q for q in z.e["quellen"] if not Path(q).is_dir()]}
 
     @app.get("/api/einstellungen")
@@ -112,6 +127,7 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
     @app.post("/api/einstellungen")
     def einstellungen_schreiben(neu: dict = Body(...)):
         alt_beschl = z.e.get("beschleunigung")
+        alt_lang = dict(z.e["beschreibung"]["ausfuehrlich"])
         werte = z.e.aktualisieren(neu)
         if "kategorien" in neu:
             # Wurde eine Kategorie zur Zusatzkategorie, werden von Hand gesetzte Zuordnungen mitgenommen
@@ -124,6 +140,11 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
                     z.db.zusatz_setzen(ids, k, True, zusatz)
         if werte.get("beschleunigung") != alt_beschl and not z.indexer.status["laeuft"]:
             z.m.entladen()  # beim nächsten Gebrauch auf dem neuen Gerät laden
+        a = werte["beschreibung"]["ausfuehrlich"]
+        if a["aktiv"] and (not alt_lang["aktiv"] or alt_lang["modell"] != a["modell"]):
+            # erst jetzt (gewählt und noch nicht da) herunterladen; ist es schon da, gleich beschreiben
+            if not z.m.download.starten(a["modell"]) and modelle.ausfuehrlich_vorhanden(a["modell"]):
+                z._nach_download(a["modell"])
         if any(k in neu for k in ("kategorien", "arbeitszeit", "inhalt", "schwelle", "regeln", "themen")):
             threading.Thread(target=_einordnen, daemon=True).start()
         return werte
@@ -272,13 +293,16 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
             if art in ("beides", "bedeutung"):
                 clip = z.m.clip()
                 if clip is not None:
-                    sem = _vektor_rang(clip.texte([q.strip()])[0], schwelle=0.17, max_n=600)
+                    qv = clip.texte([q.strip()])[0]
+                    sem = _vektor_rang(qv, schwelle=0.17, max_n=600)
                     if sem:
                         # nur Treffer nahe am besten: sonst kommt bei seltenen Begriffen viel Rauschen dazu
                         grenze = max(sem.values()) - (0.08 if art == "bedeutung" else 0.05)
+                        sem = {i: s for i, s in sem.items() if s >= grenze}
                         for i, s in sem.items():
-                            if s >= grenze:
-                                rang[i] = max(rang.get(i, 0), s)
+                            rang[i] = max(rang.get(i, 0), s)
+                    for i, s in _beschreibung_rang(qv, sem).items():
+                        rang[i] = max(rang.get(i, 0), s)
         if rang is not None:
             if not rang:
                 return {"gesamt": 0, "bilder": []}
@@ -297,6 +321,26 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
         zeilen = z.db.abfrage(f"SELECT *, {KAT} AS kategorie FROM bilder WHERE {wo} ORDER BY {ordnung} "
                               f"LIMIT ? OFFSET ?", (*par, limit, offset))
         return {"gesamt": gesamt, "bilder": [kurz(r) for r in zeilen]}
+
+    def _beschreibung_rang(v: np.ndarray, sem: dict[int, float]) -> dict[int, float]:
+        """Bedeutungssuche in den ausführlichen Beschreibungen (Satz für Satz).
+        Text-zu-Text-Ähnlichkeiten liegen höher als Text-zu-Bild, deshalb keine feste Schwelle:
+        ein Satz zählt, wenn er deutlich über dem Durchschnitt aller Sätze liegt (in Standardabweichungen)
+        und nahe am besten Satz. Treffer werden hinter den passenden Bildern einsortiert."""
+        ids, mat = z.db.beschreibung_matrix()
+        if len(ids) < 20 or mat.shape[1] != v.shape[0]:
+            return {}
+        norm = np.linalg.norm(mat, axis=1) + 1e-9
+        sims = (mat @ (v / (np.linalg.norm(v) + 1e-9))) / norm
+        strenge = float(z.e["beschreibung"]["ausfuehrlich"].get("such_strenge", 3.0))
+        grenze = max(float(sims.mean() + strenge * sims.std()), float(sims.max()) - 0.06)
+        bester: dict[int, float] = {}
+        for i, s in zip(ids.tolist(), sims.tolist()):
+            if s >= grenze and s > bester.get(i, -1):
+                bester[i] = s
+        basis = min(sem.values()) if sem else 0.2  # knapp unter dem schwächsten Bildtreffer
+        top = max(bester.values(), default=0)
+        return {i: basis - 0.001 - (top - s) for i, s in sorted(bester.items(), key=lambda x: -x[1])[:300]}
 
     def _vektor_rang(v: np.ndarray, schwelle: float, max_n: int) -> dict[int, float]:
         ids, mat = z.db.clip_matrix()
@@ -321,7 +365,7 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
     @app.get("/api/bild/{bild_id}")
     def bild_details(bild_id: int):
         r = bild_oder_404(bild_id)
-        d = {k: r[k] for k in r.keys() if k not in ("clip", "suchtext")}
+        d = {k: r[k] for k in r.keys() if k not in ("clip", "suchtext", "beschreibung_lang_vek")}
         d["name"] = Path(r["pfad"]).name
         d["zusatz"] = zusatz_liste(r)
         d["zusatz_hand"] = {h["kategorie"]: bool(h["an"]) for h in z.db.abfrage(
@@ -393,9 +437,37 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
             raise HTTPException(400, "Keine Bilder ausgewählt")
         with z.db.verbindung() as v:
             v.executemany("UPDATE bilder SET schritt_clip=0, schritt_ocr=0, schritt_gesichter=0, "
-                          "schritt_beschreibung=0, fehler=NULL WHERE id=?", [(i,) for i in ids])
+                          "schritt_beschreibung=0, schritt_lang=0, fehler=NULL WHERE id=?", [(i,) for i in ids])
         gestartet = z.indexer.starten()
         return {"vorgemerkt": len(ids), "gestartet": gestartet}
+
+    @app.post("/api/ausfuehrlich/download")
+    def ausfuehrlich_download():
+        a = z.e["beschreibung"]["ausfuehrlich"]
+        return {"gestartet": z.m.download.starten(a["modell"]), "ausfuehrlich": z.ausfuehrlich_info()}
+
+    @app.post("/api/ausfuehrlich/abbrechen")
+    def ausfuehrlich_abbrechen():
+        z.m.download.abbrechen()
+        return {"ok": True}
+
+    @app.post("/api/bilder/neu-beschreiben")
+    def neu_beschreiben(daten: dict = Body(...)):
+        """Nur die ausführliche Beschreibung neu erzeugen, für markierte Bilder oder alle (alle=true).
+        Bildinhalt, Gesichter, Text und Kategorien bleiben, wie sie sind."""
+        if not z.e["beschreibung"]["ausfuehrlich"]["aktiv"]:
+            raise HTTPException(400, "Ausführliche Beschreibungen sind in den Einstellungen ausgeschaltet.")
+        with z.db.verbindung() as v:
+            if daten.get("alle"):
+                n = v.execute("UPDATE bilder SET schritt_lang=0").rowcount
+            else:
+                ids = [int(i) for i in daten.get("ids", [])]
+                if not ids:
+                    raise HTTPException(400, "Keine Bilder ausgewählt")
+                v.executemany("UPDATE bilder SET schritt_lang=0 WHERE id=?", [(i,) for i in ids])
+                n = len(ids)
+        gestartet = z.indexer.starten() if z.e["quellen"] else False
+        return {"vorgemerkt": n, "gestartet": gestartet}
 
     @app.post("/api/bilder/kategorie")
     def kategorie_setzen(daten: dict = Body(...)):
