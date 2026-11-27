@@ -343,7 +343,9 @@ def neu_gruppieren(db: Datenbank, einstellungen: dict | None = None) -> dict:
             reihe = np.argsort(-sim)
             zweite = sim[reihe[1]] if len(reihe) > 1 else -1
             if sim[reihe[0]] >= s["vereinen"] and sim[reihe[0]] - zweite >= s["abstand"]:
-                person[idx] = pids[reihe[0]]
+                ziel = pids[reihe[0]]
+                # Gesichter, die der Nutzer bei dieser Person abgelehnt hat, bleiben draußen
+                person[[i for i in idx if ziel not in abgelehnt.get(int(d["id"][i]), ())]] = ziel
             else:
                 rest.append(idx)
         neue = rest
@@ -504,10 +506,20 @@ def _festhalten(con, person_id: int) -> None:
     con.execute("UPDATE personen SET fest=1 WHERE id=?", (person_id,))
 
 
+def _person_mit_namen(db: Datenbank, name: str, ausser: int = 0):
+    """Vorhandene Person mit diesem Namen, Groß-/Kleinschreibung und Leerzeichen egal
+    ("marlena " = "Marlena"): sonst entstehen zwei Personen, die die Suche nicht unterscheidet."""
+    ziel = " ".join(name.split()).casefold()
+    for z in db.abfrage("SELECT id, name FROM personen WHERE name IS NOT NULL AND id<>? ORDER BY id", (ausser,)):
+        if " ".join(z["name"].split()).casefold() == ziel:
+            return (z["id"],)
+    return None
+
+
 def umbenennen(db: Datenbank, person_id: int, name: str) -> int:
     name = name.strip() or None
     # gibt es schon eine Person mit diesem Namen: zusammenführen
-    vorhanden = db.eins("SELECT id FROM personen WHERE name=? AND id<>?", (name, person_id)) if name else None
+    vorhanden = _person_mit_namen(db, name, person_id) if name else None
     if vorhanden:
         zusammenfuehren(db, vorhanden[0], [person_id])
         return vorhanden[0]
@@ -604,7 +616,7 @@ def zuweisen(db: Datenbank, gesicht_ids: list[int], person_id: int | None = None
     name = (name or "").strip()
     with db.verbindung() as con:
         if not person_id and name:
-            r = con.execute("SELECT id FROM personen WHERE name=?", (name,)).fetchone()
+            r = _person_mit_namen(db, name)
             person_id = r[0] if r else con.execute("INSERT INTO personen (name) VALUES (?)", (name,)).lastrowid
         if not person_id:
             person_id = con.execute("INSERT INTO personen (name) VALUES (NULL)").lastrowid

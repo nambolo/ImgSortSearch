@@ -275,6 +275,7 @@ def ausfuehren(auftraege: list[Auftrag], s: dict, protokoll_ordner: Path, echt: 
         raise ValueError("Für eingebettete Tags wird exiftool gebraucht. Alternative: XMP-Datei daneben.")
 
     belegt: set[Path] = set()
+    kopierte_xmp: set[Path] = set()
     eigene_sicherungen = _eigene_sicherungen(protokoll_ordner) if echt and tags_modus == "einbetten" else set()
     zaehler = {"ok": 0, "duplikat": 0, "fehlt": 0, "fehler": 0, "unveraendert": 0}
     vorschau, fehler, pfad_aenderungen = [], [], []
@@ -319,9 +320,21 @@ def ausfuehren(auftraege: list[Auftrag], s: dict, protokoll_ordner: Path, echt: 
                 continue
             try:
                 neu.parent.mkdir(parents=True, exist_ok=True)
+                def xmp_ziel(x: Path) -> Path:
+                    return neu.with_name(neu.name + ".xmp") if x.name.lower().endswith(
+                        a.pfad.name.lower() + ".xmp") else neu.with_suffix(x.suffix)
+
                 if modus == "kopieren":
+                    alte_xmp = _sidecars(a.pfad)
                     shutil.copy2(a.pfad, neu)
                     schreibe({"op": "kopie", "quelle": str(a.pfad), "ziel": str(neu)})
+                    # vorhandene XMP-Dateien (z. B. Lightroom-Bearbeitungen) gehören zur Kopie dazu
+                    for x in alte_xmp:
+                        x_neu = xmp_ziel(x)
+                        if not x_neu.exists():
+                            shutil.copy2(x, x_neu)
+                            schreibe({"op": "kopie", "quelle": str(x), "ziel": str(x_neu)})
+                            kopierte_xmp.add(x_neu)
                 elif neu != a.pfad:
                     alte_xmp = _sidecars(a.pfad)
                     shutil.move(str(a.pfad), str(neu))
@@ -329,8 +342,7 @@ def ausfuehren(auftraege: list[Auftrag], s: dict, protokoll_ordner: Path, echt: 
                     pfad_aenderungen.append((a.bild_id, str(a.pfad), str(neu)))
                     # vorhandene XMP-Dateien (z. B. Lightroom-Bearbeitungen) mitnehmen, sonst gehen sie verloren
                     for x in alte_xmp:
-                        x_neu = neu.with_name(neu.name + ".xmp") if x.name.lower().endswith(
-                            a.pfad.name.lower() + ".xmp") else neu.with_suffix(x.suffix)
+                        x_neu = xmp_ziel(x)
                         if not x_neu.exists():
                             shutil.move(str(x), str(x_neu))
                             schreibe({"op": "verschoben", "quelle": str(x), "ziel": str(x_neu)})
@@ -342,6 +354,15 @@ def ausfuehren(auftraege: list[Auftrag], s: dict, protokoll_ordner: Path, echt: 
                     if not xmp.exists():
                         xmp.write_text(xmp_sidecar(a), encoding="utf-8")
                         schreibe({"op": "sidecar", "ziel": str(xmp)})
+                    elif xmp in kopierte_xmp and shutil.which("exiftool"):
+                        # mitkopierte XMP (z. B. Lightroom): Tags in die Kopie ergänzen, das Original bleibt
+                        if exif is None:
+                            exif = _Exiftool()
+                        try:
+                            _einbetten(xmp, a, False, exif)
+                        except RuntimeError as ex:  # z. B. kaputte XMP: die Kopie selbst ist trotzdem gut
+                            fehler.append(f"{a.pfad}: kopiert, Tags aber nicht in die vorhandene XMP-Datei "
+                                          f"geschrieben ({ex})")
                 elif art == "einbetten":
                     sicherung = modus != "kopieren"  # Kopien dürfen direkt geändert werden
                     if sicherung and Path(str(neu) + "_original").exists() \
