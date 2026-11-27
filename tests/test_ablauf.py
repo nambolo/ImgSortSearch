@@ -18,7 +18,7 @@ def warte_auf_index(c: TestClient, max_s=30):
 
 @pytest.fixture
 def client(zustand):
-    return TestClient(erstelle_app(zustand))
+    return TestClient(erstelle_app(zustand), headers={"X-ImgSortSearch": "1"})
 
 
 def bilder(c, **params):

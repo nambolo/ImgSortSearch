@@ -7,7 +7,8 @@ const esc = (t) => String(t ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const FARBEN = ["#2563eb", "#16a34a", "#f59e0b", "#db2777", "#0891b2", "#7c3aed", "#ea580c", "#65a30d"];
 
 async function api(pfad, opt = {}) {
-  const o = { headers: {}, ...opt };
+  // Kennung, ohne die der Server ändernde Anfragen ablehnt (Schutz vor fremden Webseiten)
+  const o = { ...opt, headers: { "X-ImgSortSearch": "1", ...(opt.headers || {}) } };
   if (o.json !== undefined) { o.body = JSON.stringify(o.json); o.headers["Content-Type"] = "application/json"; o.method = o.method || "POST"; }
   const r = await fetch(pfad, o);
   let daten = null;
@@ -52,7 +53,8 @@ function farbe(kat) { return S.farben[kat] || "#475069"; }
 function zeige(ansicht) {
   $$("nav button").forEach((b) => b.classList.toggle("aktiv", b.dataset.ansicht === ansicht));
   $$(".ansicht").forEach((a) => a.classList.toggle("aktiv", a.id === "ansicht-" + ansicht));
-  ({ themen: ladeThemen, personen: ladePersonen, sortieren: ladeSortieren, einstellungen: ladeEinstellungen }[ansicht] || (() => {}))();
+  const laden = { themen: ladeThemen, personen: ladePersonen, sortieren: ladeSortieren, einstellungen: ladeEinstellungen }[ansicht];
+  if (laden) Promise.resolve().then(laden).catch((e) => toast(e.message, true));
 }
 $$("nav button").forEach((b) => b.addEventListener("click", () => zeige(b.dataset.ansicht)));
 
@@ -342,11 +344,17 @@ $("#bild-suche").addEventListener("change", async (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    if (!$("#vollbild").hidden) { $("#vollbild").hidden = true; return; }
+    if (!$("#dialog").hidden) { $("#dialog-nein").click(); return; }
+  }
   if (!$("#ansicht-suche").classList.contains("aktiv")) return;
+  if (!$("#vollbild").hidden || !$("#dialog").hidden) return;  // nichts darunter verändern
   const imFeld = ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName);
-  if (e.key === "Escape") { $("#vollbild").hidden = true; }
   if (imFeld) return;
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c") { e.preventDefault(); kopieren(); }
+  // markierten Text (Pfad, erkannter Text ...) normal kopieren statt der Bilddateien
+  const textMarkiert = String(window.getSelection() || "").trim() !== "";
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c" && !textMarkiert) { e.preventDefault(); kopieren(); }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") { e.preventDefault(); S.bilder.forEach((b) => S.gewaehlt.add(b.id)); aktualisiereAuswahl(); }
   if (["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"].includes(e.key) && S.bilder.length) {
     e.preventDefault();
@@ -362,6 +370,10 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && S.fokus && S.modus === "raster") { setzeModus("liste"); zeichneErgebnis(); zeigeDetail(S.fokus); scrolleZuFokus(); }
 });
 $("#vollbild").onclick = () => { $("#vollbild").hidden = true; };
+// Eine Datei, die neben die Ablagefläche fällt, würde sonst das Programmfenster durch das Bild ersetzen
+["dragover", "drop"].forEach((art) => window.addEventListener(art, (e) => {
+  if (!(e.target instanceof Element) || !e.target.closest("#ablage")) e.preventDefault();
+}));
 
 /* ------------------------------------------------------------ Themen & Kategorien */
 
@@ -434,7 +446,10 @@ async function ladePersonen() {
     const id = +el.dataset.id;
     const name = $("input:not(.wahl)", el);
     $("img", el).onclick = () => personFilter(id, name.value);
-    name.onchange = async () => { await api(`/api/personen/${id}/name`, { json: { name: name.value } }); toast("Name gespeichert"); ladePersonen(); };
+    name.onchange = async () => {
+      try { await api(`/api/personen/${id}/name`, { json: { name: name.value } }); toast("Name gespeichert"); await ladePersonen(); }
+      catch (e) { toast(e.message, true); }
+    };
     $(".wahl", el).onchange = (e) => {
       e.target.checked ? personenWahl.add(id) : personenWahl.delete(id);
       el.classList.toggle("gewaehlt", e.target.checked);
@@ -442,12 +457,17 @@ async function ladePersonen() {
     };
   });
 }
-$("#personen-gruppieren").onclick = async () => { const r = await api("/api/personen/neu-gruppieren", { method: "POST" }); toast(`${r.zugeordnet} Gesichter zugeordnet`); ladePersonen(); };
+$("#personen-gruppieren").onclick = async () => {
+  try { const r = await api("/api/personen/neu-gruppieren", { method: "POST" }); toast(`${r.zugeordnet} Gesichter zugeordnet`); await ladePersonen(); }
+  catch (e) { toast(e.message, true); }
+};
 $("#personen-zusammen").onclick = async () => {
   const ids = [...personenWahl];
-  await api("/api/personen/zusammenfuehren", { json: { ziel: ids[0], quellen: ids.slice(1) } });
-  toast("Zusammengeführt");
-  ladePersonen();
+  try {
+    await api("/api/personen/zusammenfuehren", { json: { ziel: ids[0], quellen: ids.slice(1) } });
+    toast("Zusammengeführt");
+    await ladePersonen();
+  } catch (e) { toast(e.message, true); }
 };
 async function personSuchen(datei) {
   const fd = new FormData();
@@ -542,13 +562,17 @@ async function ladeProtokolle() {
       ${p.rueckgaengig ? "<span class='hinweis'>rückgängig gemacht</span>" : `<button class="knopf leicht" data-p="${p.id}">Rückgängig</button>`}</div>`).join("")
     : `<div class="hinweis">Noch keine Läufe.</div>`;
   $$("#protokolle [data-p]").forEach((b) => b.onclick = async () => {
-    const v = await api(`/api/protokolle/${b.dataset.p}/rueckgaengig`, { method: "POST" });
-    const ok = await frage("Lauf rückgängig machen?", `${v.anzahl} Schritte werden zurückgenommen.${v.probleme.length ? `<br><br>${v.probleme.length} Einträge werden übersprungen:<br>${v.probleme.slice(0, 10).map(esc).join("<br>")}` : ""}`, "Rückgängig machen");
-    if (!ok) return;
-    await api(`/api/protokolle/${b.dataset.p}/rueckgaengig?echt=true`, { method: "POST" });
-    toast("Rückgängig gemacht");
-    ladeProtokolle();
-    suchen();
+    try {
+      const v = await api(`/api/protokolle/${b.dataset.p}/rueckgaengig`, { method: "POST" });
+      const probleme = v.probleme || [];
+      const ok = await frage("Lauf rückgängig machen?", `${v.anzahl} Schritte werden zurückgenommen.${probleme.length ? `<br><br>${probleme.length} Einträge werden übersprungen:<br>${probleme.slice(0, 10).map(esc).join("<br>")}` : ""}`, "Rückgängig machen");
+      if (!ok) return;
+      b.disabled = true;  // kein doppelter Klick während des Laufs
+      await api(`/api/protokolle/${b.dataset.p}/rueckgaengig?echt=true`, { method: "POST" });
+      toast("Rückgängig gemacht");
+      ladeProtokolle();
+      suchen();
+    } catch (e) { b.disabled = false; toast(e.message, true); }
   });
 }
 
@@ -580,15 +604,24 @@ $("#e-schwelle").oninput = (ev) => { $("#e-schwelle-wert").textContent = ev.targ
 function zeichneQuellen() {
   $("#e-quellen").innerHTML = quellen.length ? quellen.map((q, i) => `<div class="quelle"><span>${esc(q)}</span><button data-i="${i}" title="Entfernen">✕</button></div>`).join("")
     : `<div class="hinweis">Noch kein Ordner. Füge den Ordner deines Bilder-Backups hinzu.</div>`;
-  $$("#e-quellen button").forEach((b) => b.onclick = () => { quellen.splice(+b.dataset.i, 1); zeichneQuellen(); });
+  $$("#e-quellen button").forEach((b) => b.onclick = () => { quellen.splice(+b.dataset.i, 1); zeichneQuellen(); quellenSpeichern(); });
 }
-$("#e-quelle-waehlen").onclick = () => ordnerWaehlen("#e-quelle-neu");
-$("#e-quelle-add").onclick = () => {
+// Bilder-Ordner werden sofort gespeichert, sonst meldet "Index erstellen" trotzdem "kein Ordner"
+async function quellenSpeichern() {
+  try { S.einst = await api("/api/einstellungen", { json: { quellen } }); toast("Bilder-Ordner gespeichert"); }
+  catch (e) { toast(e.message, true); }
+}
+function quelleHinzufuegen() {
   const p = $("#e-quelle-neu").value.trim();
-  if (p && !quellen.includes(p)) quellen.push(p);
   $("#e-quelle-neu").value = "";
+  if (!p || quellen.includes(p)) return;
+  quellen.push(p);
   zeichneQuellen();
-};
+  quellenSpeichern();
+}
+$("#e-quelle-waehlen").onclick = async () => { await ordnerWaehlen("#e-quelle-neu"); quelleHinzufuegen(); };
+$("#e-quelle-add").onclick = quelleHinzufuegen;
+$("#e-quelle-neu").addEventListener("keydown", (e) => { if (e.key === "Enter") quelleHinzufuegen(); });
 $("#e-speichern").onclick = async () => {
   const neu = {
     quellen,
@@ -623,6 +656,7 @@ async function ladeGrundlagen() {
   for (let i = 0; i < 50; i++) {
     try { await ladeGrundlagen(); break; } catch { await new Promise((r) => setTimeout(r, 200)); }
   }
+  if (!S.einst) { toast("Verbindung zum Programm fehlgeschlagen. Bitte neu starten.", true); return; }
   await ladeFilter().catch(() => {});
   suchen();
   status();

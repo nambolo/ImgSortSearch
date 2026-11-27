@@ -266,19 +266,17 @@ class OCR:
     def __init__(self, backend: str = "auto", sprache: str = "de"):
         self.sprache = sprache
         self.backend = None
+        self._rapid = None
+        self._auto = backend == "auto"
         reihenfolge = {"auto": ["windows", "rapidocr"], "windows": ["windows"],
                        "rapidocr": ["rapidocr"]}.get(backend, ["rapidocr"])
         fehler = []
         for name in reihenfolge:
             try:
                 if name == "windows":
-                    if sys.platform != "win32":
-                        raise RuntimeError("nur unter Windows")
-                    import winocr
-                    self._winocr = winocr
+                    self._winocr, self.sprache = self._windows_vorbereiten(sprache)
                 else:
-                    from rapidocr_onnxruntime import RapidOCR
-                    self._rapid = RapidOCR()
+                    self._rapid = self._rapid_laden()
                 self.backend = name
                 break
             except Exception as e:
@@ -286,14 +284,51 @@ class OCR:
         if not self.backend:
             raise RuntimeError("Keine Texterkennung verfügbar (" + "; ".join(fehler) + ")")
 
+    @staticmethod
+    def _rapid_laden():
+        from rapidocr_onnxruntime import RapidOCR
+        return RapidOCR()
+
+    @staticmethod
+    def _windows_vorbereiten(sprache: str):
+        """Prüft, ob Windows für die Sprache eine Texterkennung installiert hat ("de" -> auch "de-DE" usw.).
+
+        Ohne passendes Sprachpaket liefert Windows keine OCR-Engine; das soll beim Start auffallen
+        (und auf RapidOCR ausweichen), nicht erst bei jedem einzelnen Bild."""
+        if sys.platform != "win32":
+            raise RuntimeError("nur unter Windows")
+        import winocr
+        probe = Image.new("RGB", (64, 32), "white")
+        kandidaten = [sprache] + [f"{sprache}-{land}" for land in ("DE", "AT", "CH")] + ["en-US"]
+        letzter = None
+        for tag in dict.fromkeys(kandidaten):
+            try:
+                winocr.recognize_pil_sync(probe, tag)
+                return winocr, tag
+            except Exception as e:  # Sprache nicht installiert
+                letzter = e
+        raise RuntimeError(f"keine Windows-Texterkennung für '{sprache}' installiert ({letzter})")
+
     def lesen(self, img: Image.Image) -> str:
         if self.backend == "windows":
-            erg = self._winocr.recognize_pil_sync(img, self.sprache)
-            text = erg.get("text", "") if isinstance(erg, dict) else getattr(erg, "text", "")
+            try:
+                erg = self._winocr.recognize_pil_sync(img.convert("RGB"), self.sprache)
+                text = erg.get("text", "") if isinstance(erg, dict) else getattr(erg, "text", "")
+            except Exception as e:
+                if not self._auto:
+                    raise
+                # Windows-OCR versagt (z. B. Bild zu groß): für dieses Bild RapidOCR nehmen
+                log.warning("Windows-Texterkennung fehlgeschlagen (%s), nutze RapidOCR", e)
+                if self._rapid is None:
+                    self._rapid = self._rapid_laden()
+                text = self._rapid_lesen(img)
         else:
-            res, _ = self._rapid(np.asarray(img))
-            text = " ".join(r[1] for r in (res or []))
-        return " ".join(text.split())
+            text = self._rapid_lesen(img)
+        return " ".join((text or "").split())
+
+    def _rapid_lesen(self, img: Image.Image) -> str:
+        res, _ = self._rapid(np.asarray(img.convert("RGB")))
+        return " ".join(r[1] for r in (res or []))
 
 
 # ------------------------------------------------------------------ Bildbeschreibung

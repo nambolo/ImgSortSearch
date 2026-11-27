@@ -46,6 +46,17 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
     app = FastAPI(title="ImgSortSearch")
     app.state.z = z
 
+    @app.middleware("http")
+    async def nur_lokal(request, call_next):
+        # Schutz gegen fremde Webseiten im Browser: DNS-Rebinding (falscher Host) und
+        # Cross-Site-Anfragen, die sonst z. B. ein Sortieren auslösen könnten.
+        host = (request.headers.get("host") or "").rsplit(":", 1)[0].strip("[]").lower()
+        if host not in ("127.0.0.1", "localhost", "::1", "testserver"):
+            return JSONResponse({"detail": "Nur lokal erreichbar"}, status_code=403)
+        if request.method not in ("GET", "HEAD", "OPTIONS") and request.headers.get("x-imgsortsearch") != "1":
+            return JSONResponse({"detail": "Anfrage abgelehnt"}, status_code=403)
+        return await call_next(request)
+
     def bild_oder_404(bild_id: int):
         r = z.db.eins(f"SELECT *, {KAT} AS kategorie FROM bilder WHERE id=?", (bild_id,))
         if not r:
@@ -95,7 +106,10 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
     def ordner_waehlen():
         if z.fenster is not None:
             import webview
-            erg = z.fenster.create_file_dialog(webview.FileDialog.FOLDER)
+            art = getattr(getattr(webview, "FileDialog", None), "FOLDER", None)
+            erg = z.fenster.create_file_dialog(art if art is not None else webview.FOLDER_DIALOG)
+            if isinstance(erg, str):  # je nach pywebview-Version Text oder Liste
+                return {"pfad": erg or None}
             return {"pfad": erg[0] if erg else None}
         try:  # Fallback ohne eigenes Fenster
             import tkinter
@@ -293,7 +307,10 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
 
     @app.post("/api/bilder/{bild_id}/explorer")
     def explorer(bild_id: int):
-        zwischenablage.im_explorer_zeigen(bild_oder_404(bild_id)["pfad"])
+        try:
+            zwischenablage.im_explorer_zeigen(bild_oder_404(bild_id)["pfad"])
+        except (OSError, RuntimeError) as ex:
+            raise HTTPException(400, str(ex))
         return {"ok": True}
 
     # ------------------------------------------------------------ Themen
@@ -411,10 +428,11 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
         s = dict(z.e["sortieren"], **daten.get("einstellungen", {}))
         z.e.aktualisieren({"sortieren": s})
         auftraege = _auftraege(daten.get("nur"))
+        # schon hier setzen: sonst sieht die Oberfläche kurz "läuft nicht" und zeigt ein altes Ergebnis
+        z.sortier_status.update(laeuft=True, fertig=0, gesamt=len(auftraege), ergebnis=None)
 
         def lauf():
             st = z.sortier_status
-            st.update(laeuft=True, fertig=0, gesamt=len(auftraege), ergebnis=None)
             try:
                 erg = sortieren.ausfuehren(auftraege, s, daten_ordner() / "protokolle", echt=True,
                                            fortschritt=lambda n, g: st.update(fertig=n, gesamt=g))
