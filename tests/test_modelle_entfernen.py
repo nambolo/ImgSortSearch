@@ -144,3 +144,14 @@ def test_clip_unklar_nichts_loeschen(zustand, bestand, monkeypatch):
 def test_leerer_modellordner(client):
     r = client.get("/api/modelle").json()
     assert r["frei"] == 0 and all(x["gebraucht"] for x in r["modelle"])
+
+
+def test_keine_huggingface_warnungen():
+    """Windows ohne Symlinks und ohne hf_xet: keine Warnung je Modell bei Installation und Start."""
+    import subprocess
+    import sys
+    code = ("import imgsortsearch, huggingface_hub.constants as c; "
+            "print(c.HF_HUB_DISABLE_SYMLINKS_WARNING, c.HF_HUB_DISABLE_XET)")
+    env = {k: v for k, v in __import__("os").environ.items() if not k.startswith("HF_HUB_DISABLE")}
+    aus = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, check=True)
+    assert aus.stdout.split() == ["True", "True"]
