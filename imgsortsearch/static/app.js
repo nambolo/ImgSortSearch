@@ -737,6 +737,7 @@ let personenDaten = [];
 async function ladePersonen() {
   const r = await api("/api/personen");
   personenDaten = r.personen;
+  ladeVorschlaege().catch(() => {});
   personenWahl.clear();
   $("#personen-zusammen").disabled = true;
   const h = $("#personen-hinweis");
@@ -763,6 +764,33 @@ async function ladePersonen() {
       el.classList.toggle("gewaehlt", e.target.checked);
       $("#personen-zusammen").disabled = personenWahl.size < 2;
     };
+  });
+}
+
+/* Vorschläge: zwei Gruppen derselben Person */
+async function ladeVorschlaege() {
+  const r = await api("/api/personen/vorschlaege");
+  const v = r.vorschlaege;
+  $("#personen-vorschlaege").hidden = !v.length;
+  $("#pv-anzahl").textContent = v.length ? `${v.length} Vorschläge` : "";
+  const karte = (p) => `<div class="pv-person"><img src="/api/gesicht/${p.titel_gesicht}" alt="">
+    <span>${p.name ? esc(p.name) : "unbenannt"}</span><small>${p.bilder} Bilder</small></div>`;
+  $("#pv-liste").innerHTML = v.map((x, i) => `<div class="vorschlag" data-i="${i}">${karte(x.a)}<span class="pv-gleich">=</span>${karte(x.b)}
+    <div class="pv-knoepfe"><button class="knopf" data-ja>Ja, dieselbe</button><button class="knopf leicht" data-nein>Nein</button></div></div>`).join("");
+  $$("#pv-liste .vorschlag").forEach((el) => {
+    const x = v[+el.dataset.i];
+    $("[data-ja]", el).onclick = async () => {
+      try {
+        await api("/api/personen/zusammenfuehren", { json: { ziel: x.a.id, quellen: [x.b.id] } });
+        toast(`Zusammengeführt${x.a.name || x.b.name ? ` zu ${x.a.name || x.b.name}` : ""}`);
+        await ladePersonen();
+      } catch (e) { toast(e.message, true); }
+    };
+    $("[data-nein]", el).onclick = async () => {
+      try { await api("/api/personen/verschieden", { json: { a: x.a.id, b: x.b.id } }); el.remove(); }
+      catch (e) { toast(e.message, true); }
+    };
+    $$("img", el).forEach((img, k) => { img.onclick = () => { const p = k ? x.b : x.a; personOeffnen(p.id, p.name || "").catch((e) => toast(e.message, true)); }; });
   });
 }
 
@@ -799,6 +827,10 @@ async function personOeffnen(id, name) {
       pdAuswahlZeigen();
     };
   });
+  const andere = personenDaten.filter((p) => p.id !== id)
+    .sort((a, b) => (!a.name - !b.name) || (a.name || "").localeCompare(b.name || "") || b.bilder - a.bilder);
+  $("#pd-gruppe").innerHTML = `<option value="">Ganze Gruppe zusammenführen mit …</option>` +
+    andere.map((p) => `<option value="${p.id}">${p.name ? esc(p.name) : `unbenannte Gruppe (${p.bilder} Bilder)`}</option>`).join("");
   $("#pd-ziel").innerHTML = `<option value="">Anderer Person zuweisen …</option>` +
     personenDaten.filter((p) => p.name && p.id !== id).map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("") +
     `<option value="neu">Neue Person …</option>`;
@@ -840,6 +872,25 @@ $("#pd-ziel").onchange = async (e) => {
 };
 $("#pd-schliessen").onclick = () => { $("#person-detail").hidden = true; };
 $("#pd-bilder").onclick = () => personFilter(PD.id, PD.name);
+$("#pd-gruppe").onchange = async (e) => {
+  const ziel = +e.target.value;
+  e.target.value = "";
+  if (!ziel) return;
+  const p = personenDaten.find((x) => x.id === ziel);
+  const zielName = p && p.name ? p.name : "die andere Gruppe";
+  const ok = await frage("Gruppen zusammenführen",
+    `Alle ${PD.gesichter.length} Gesichter von <b>${esc(PD.name || "dieser Gruppe")}</b> kommen zu <b>${esc(zielName)}</b>. Hat nur eine der beiden Gruppen einen Namen, bleibt dieser Name.`,
+    "Zusammenführen");
+  if (ok !== true) return;
+  try {
+    const r = await api("/api/personen/zusammenfuehren", { json: { ziel, quellen: [PD.id] } });
+    toast(`Zusammengeführt mit ${zielName}`);
+    await ladePersonen();
+    const neu = personenDaten.find((x) => x.id === r.ziel);
+    if (neu) await personOeffnen(neu.id, neu.name || "");
+    else $("#person-detail").hidden = true;
+  } catch (err) { toast(err.message, true); }
+};
 $("#personen-gruppieren").onclick = async () => {
   try {
     const r = await api("/api/personen/neu-gruppieren", { method: "POST" });

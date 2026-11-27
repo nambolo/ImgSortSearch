@@ -578,10 +578,19 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
     def person_benennen(person_id: int, daten: dict = Body(...)):
         return {"id": personen.umbenennen(z.db, person_id, daten.get("name", ""))}
 
+    @app.get("/api/personen/vorschlaege")
+    def personen_vorschlaege():
+        return {"vorschlaege": personen.vorschlaege(z.db, z.e.werte)}
+
+    @app.post("/api/personen/verschieden")
+    def personen_verschieden(daten: dict = Body(...)):
+        personen.verschieden_merken(z.db, int(daten["a"]), int(daten["b"]))
+        return {"ok": True}
+
     @app.post("/api/personen/zusammenfuehren")
     def person_zusammen(daten: dict = Body(...)):
-        personen.zusammenfuehren(z.db, int(daten["ziel"]), [int(i) for i in daten["quellen"]])
-        return {"ok": True}
+        ziel = personen.zusammenfuehren(z.db, int(daten["ziel"]), [int(i) for i in daten["quellen"]])
+        return {"ok": True, "ziel": ziel}
 
     @app.get("/api/personen/{person_id}/gesichter")
     def person_gesichter(person_id: int):
