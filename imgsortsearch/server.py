@@ -5,6 +5,7 @@ import io
 import logging
 import shutil
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from . import dubletten, modelle, papierkorb, personen, sortieren, zwischenablage
+from . import dubletten, modelle, orte, papierkorb, personen, sortieren, zwischenablage
 from .datenbank import Datenbank
 from .einstellungen import Einstellungen, daten_ordner
 from .indexer import Indexer, Modelle, alle_neu_einordnen, bilder_entfernen, bilder_im_ordner, lade_themen, \
@@ -41,6 +42,16 @@ class Zustand:
         self.dubletten_stop = threading.Event()
         self.dubletten = dubletten.Suche(self.db, vorschau_pfad, self.dubletten_stop)
         self.dubletten_ergebnis = None
+        self.kacheln = orte.Kacheln()
+        self.indexer.nach_metadaten.append(self._orte_zuordnen)
+        # ältere Indexe: Ortsnamen einmal nachtragen (geht schnell, es wird kein Bild geöffnet)
+        threading.Thread(target=self._orte_zuordnen, daemon=True).start()
+
+    def _orte_zuordnen(self):
+        try:
+            orte.orte_zuordnen(self.db)
+        except Exception:
+            log.exception("Ortsnamen zuordnen fehlgeschlagen")
 
     def _personen_zuordnen(self):
         self.indexer.status["meldung"] = "Gesichter werden Personen zugeordnet ..."
@@ -77,7 +88,8 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
                 "kategorie": r["kategorie"], "manuell": r["kategorie_manuell"] is not None,
                 "zusatz": zusatz_liste(r),
                 "sicherheit": r["sicherheit"], "tags": r["tags"] or "", "beschreibung": r["beschreibung"] or "",
-                "kamera": r["kamera"], "gesichter": r["anzahl_gesichter"] or 0}
+                "kamera": r["kamera"], "gesichter": r["anzahl_gesichter"] or 0, "ort": r["ort"] or "",
+                "gps": [r["gps_lat"], r["gps_lon"]] if r["gps_lat"] is not None else None}
 
     # ------------------------------------------------------------ Status / Einstellungen
 
@@ -199,14 +211,17 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
                     zaehler[t] = zaehler.get(t, 0) + 1
         reihenfolge = [t["name"] for t in z.e["themen"]]
         themen = sorted(zaehler, key=lambda t: (reihenfolge.index(t) if t in reihenfolge else len(reihenfolge), t))
-        return {"jahre": jahre, "kameras": kameras,
+        laender = [{"name": r["ort_land"], "anzahl": r["n"]} for r in z.db.abfrage(
+            "SELECT ort_land, COUNT(*) n FROM bilder WHERE ort_land IS NOT NULL AND ort_land != '' "
+            "GROUP BY ort_land ORDER BY n DESC")]
+        orte_liste = [{"name": r["ort_stadt"], "land": r["ort_land"], "anzahl": r["n"]} for r in z.db.abfrage(
+            "SELECT ort_stadt, ort_land, COUNT(*) n FROM bilder WHERE ort_stadt IS NOT NULL AND ort_stadt != '' "
+            "GROUP BY ort_stadt, ort_land ORDER BY n DESC LIMIT 300")]
+        return {"jahre": jahre, "kameras": kameras, "laender": laender, "orte": orte_liste,
                 "themen": [{"name": t, "anzahl": zaehler[t]} for t in themen],
                 "kategorien": haupt_kategorien(z.e.werte) + [UNKLAR] + zusatz_kategorien(z.e.werte)}
 
-    @app.get("/api/bilder")
-    def bilder(q: str = "", kategorie: str = "", jahr: str = "", kamera: str = "", person: int = 0, thema: str = "",
-               aehnlich_zu: int = 0, nur_manuell: bool = False, sortierung: str = "datum_ab",
-               offset: int = 0, limit: int = 200, art: str = "beides"):
+    def bedingungen(kategorie="", jahr="", kamera="", person=0, thema="", nur_manuell=False, ort="", bereich=""):
         bed, par = ["1=1"], []
         if kategorie and kategorie in zusatz_kategorien(z.e.werte):
             bed.append("instr(zusatz, ?) > 0")
@@ -228,7 +243,18 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
             par.append(person)
         if nur_manuell:
             bed.append("kategorie_manuell IS NOT NULL")
-        wo = " AND ".join(bed)
+        for wert, fn in ((ort, orte.ort_bedingung), (bereich, orte.bereich_bedingung)):
+            if wert:
+                b, p = fn(wert)
+                bed.append(b)
+                par += p
+        return " AND ".join(bed), par
+
+    @app.get("/api/bilder")
+    def bilder(q: str = "", kategorie: str = "", jahr: str = "", kamera: str = "", person: int = 0, thema: str = "",
+               aehnlich_zu: int = 0, nur_manuell: bool = False, sortierung: str = "datum_ab",
+               offset: int = 0, limit: int = 200, art: str = "beides", ort: str = "", bereich: str = ""):
+        wo, par = bedingungen(kategorie, jahr, kamera, person, thema, nur_manuell, ort, bereich)
 
         rang: dict[int, float] | None = None
         if aehnlich_zu:
@@ -399,6 +425,44 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
             zwischenablage.im_explorer_zeigen(bild_oder_404(bild_id)["pfad"])
         except (OSError, RuntimeError) as ex:
             raise HTTPException(400, str(ex))
+        return {"ok": True}
+
+    # ------------------------------------------------------------ Karte
+
+    @app.get("/api/karte/punkte")
+    def karte_punkte(kategorie: str = "", jahr: str = "", kamera: str = "", person: int = 0, thema: str = ""):
+        """Alle Bilder mit GPS-Daten, kompakt: [id, Breite, Länge, Ortsnummer] und die Liste der Ortsnamen."""
+        wo, par = bedingungen(kategorie, jahr, kamera, person, thema)
+        namen: dict[str, int] = {}
+        punkte = []
+        for r in z.db.abfrage(f"SELECT id, gps_lat, gps_lon, ort FROM bilder WHERE {wo} AND gps_lat IS NOT NULL "
+                              "AND gps_lon IS NOT NULL ORDER BY datum DESC", par):
+            n = namen.setdefault(r["ort"] or "", len(namen))
+            punkte.append([r["id"], round(r["gps_lat"], 6), round(r["gps_lon"], 6), n])
+        ohne = z.db.eins(f"SELECT COUNT(*) n FROM bilder WHERE {wo} AND gps_lat IS NULL", par)["n"]
+        return {"punkte": punkte, "orte": list(namen), "ohne_gps": ohne}
+
+    @app.get("/api/karte/info")
+    def karte_info():
+        anzahl, groesse = z.kacheln.groesse()
+        k = z.e["karte"]
+        return {"online": bool(k.get("online")), "detail": bool(k.get("detail", True)),
+                "kacheln": anzahl, "bytes": groesse,
+                "offline": time.time() < z.kacheln.offline_bis, "fehler": z.kacheln.letzter_fehler}
+
+    @app.get("/api/karte/kachel/{kz}/{kx}/{ky}.png")
+    def karte_kachel(kz: int, kx: int, ky: int):
+        k = z.e["karte"]
+        daten = z.kacheln.kachel(kz, kx, ky, online=bool(k.get("online")),
+                                 url=k.get("kachel_url") or orte.KACHEL_URL)
+        if daten is None:
+            return Response(status_code=404)
+        art = "image/jpeg" if daten.startswith(b"\xff\xd8") else "image/png"
+        return Response(daten, media_type=art, headers={"Cache-Control": "max-age=86400"})
+
+    @app.post("/api/karte/leeren")
+    def karte_leeren():
+        z.kacheln.leeren()
         return {"ok": True}
 
     # ------------------------------------------------------------ Themen

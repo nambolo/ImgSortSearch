@@ -253,6 +253,33 @@ main { min-width: 0; min-height: 0; position: relative; }
 .d-status button:hover { color: var(--akzent2); }
 .d-besser { color: var(--gut); }
 
+/* ---------- Karte ---------- */
+#ansicht-karte.aktiv { display: flex; flex-direction: column; gap: 12px; }
+#ansicht-karte .leiste { justify-content: space-between; flex-wrap: wrap; }
+#ansicht-karte .leiste select { padding: 6px 9px; font-size: 13px; }
+#k-bereich.aktiv { border-color: var(--akzent2); background: rgba(34,211,238,.15); }
+.landkarte-huelle { flex: 1; min-height: 0; position: relative; border-radius: 14px; overflow: hidden; border: 1px solid var(--linie); }
+#landkarte { position: absolute; inset: 0; background: #1b2638; }
+#landkarte.auswahl { cursor: crosshair; }
+.landkarte-hinweis { position: absolute; left: 56px; top: 10px; z-index: 500; max-width: 420px; background: rgba(15,17,21,.88); border: 1px solid var(--linie); border-radius: 10px; padding: 8px 12px; font-size: 12.5px; color: var(--text2); }
+.landkarte-hinweis a { color: var(--akzent2); cursor: pointer; }
+.landkarte-fotos { position: absolute; top: 10px; right: 10px; bottom: 10px; width: 330px; z-index: 600; background: rgba(26,30,41,.96); backdrop-filter: blur(10px); border: 1px solid #39405a; border-radius: 14px; box-shadow: var(--schatten); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+#k-fotos-ort { white-space: pre-line; }
+.k-fotos-gitter { flex: 1; overflow: auto; display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; align-content: start; }
+.k-fotos-gitter img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 7px; cursor: pointer; background: var(--bg2); }
+.k-fotos-gitter img:hover { outline: 2px solid var(--akzent2); }
+.k-fotos-gitter .hinweis { grid-column: 1 / -1; }
+.leaflet-container { font: inherit; background: #1b2638; }
+.leaflet-container a { color: var(--akzent2); }
+.leaflet-bar a, .leaflet-bar a:hover { background: var(--flaeche2); color: var(--text); border-bottom-color: var(--linie); }
+.leaflet-control-attribution { background: rgba(15,17,21,.75) !important; color: var(--text3); }
+.foto-punkt { border-radius: 50%; border: 2px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.55); background: #333 center/cover no-repeat; }
+.foto-gruppe { position: relative; border-radius: 12px; border: 2px solid #fff; box-shadow: 0 3px 10px rgba(0,0,0,.6); background: #333 center/cover no-repeat; }
+.foto-gruppe b { position: absolute; right: -9px; top: -9px; min-width: 22px; height: 22px; padding: 0 6px; border-radius: 11px; background: var(--verlauf); color: #fff; font-size: 12px; line-height: 22px; text-align: center; box-shadow: 0 1px 4px rgba(0,0,0,.5); }
+.mini-karte { height: 180px; border-radius: 10px; overflow: hidden; border: 1px solid var(--linie); position: relative; }
+.mini-karte .leaflet-control-attribution { font-size: 10px; }
+.ort-link { cursor: pointer; color: var(--akzent2); }
+.ort-link:hover { text-decoration: underline; }
 /* Personen: Gesichter korrigieren */
 .person small a { color: inherit; }
 .hinweis-karte { border-color: var(--akzent2); }

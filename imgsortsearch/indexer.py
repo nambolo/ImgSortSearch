@@ -233,6 +233,7 @@ class Indexer:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.nach_lauf = []  # Callbacks, z. B. Personen zuordnen
+        self.nach_metadaten = []  # Callbacks nach dem Einlesen, z. B. Ortsnamen zu GPS-Daten
 
     # ---------------------------------------------------------- Steuerung
 
@@ -256,6 +257,8 @@ class Indexer:
         try:
             self._bildmodell_pruefen()
             self.dateien_einlesen()
+            for cb in self.nach_metadaten:
+                cb()
             if not self._stop.is_set():
                 self.analysieren(schritte)
             self._setze(phase="einordnen", meldung="Bilder werden eingeordnet ...")

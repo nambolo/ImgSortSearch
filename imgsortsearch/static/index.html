@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ImgSortSearch</title>
+<link rel="stylesheet" href="vendor/leaflet.css">
+<link rel="stylesheet" href="vendor/MarkerCluster.css">
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -17,6 +19,7 @@
       <button data-ansicht="suche" class="aktiv"><i>⌕</i>Suche</button>
       <button data-ansicht="themen"><i>◈</i>Themen &amp; Kategorien</button>
       <button data-ansicht="personen"><i>☺</i>Personen</button>
+      <button data-ansicht="karte"><i>⌖</i>Karte</button>
       <button data-ansicht="sortieren"><i>⇄</i>Sortieren</button>
       <button data-ansicht="dubletten"><i>⧉</i>Dubletten</button>
       <button data-ansicht="einstellungen"><i>⚙</i>Einstellungen</button>
@@ -57,6 +60,7 @@
         <select id="f-thema" title="Vom Programm erkannte Bildinhalte"><option value="">Alle Themen</option></select>
         <select id="f-jahr"><option value="">Alle Jahre</option></select>
         <select id="f-kamera"><option value="">Alle Kameras</option></select>
+        <select id="f-ort" title="Aufnahmeort laut GPS-Daten"><option value="">Alle Orte</option></select>
         <select id="f-sort">
           <option value="datum_ab">Neueste zuerst</option>
           <option value="datum_auf">Älteste zuerst</option>
@@ -66,6 +70,7 @@
         <span class="chip" id="f-person-chip" hidden></span>
         <span class="chip" id="f-aehnlich-chip" hidden></span>
         <span class="chip" id="f-foto-chip" hidden></span>
+        <span class="chip" id="f-bereich-chip" hidden></span>
         <span class="spacer"></span>
         <input type="range" id="groesse" min="110" max="320" value="180" title="Vorschaugröße">
         <span class="treffer" id="treffer"></span>
@@ -141,6 +146,31 @@
         </div>
       </div>
       <div class="personen-gitter" id="personen-gitter"></div>
+    </section>
+
+    <!-- ======================= Karte ======================= -->
+    <section id="ansicht-karte" class="ansicht">
+      <header class="leiste">
+        <div class="zeile">
+          <select id="k-kategorie"><option value="">Alle Kategorien</option></select>
+          <select id="k-jahr"><option value="">Alle Jahre</option></select>
+          <span class="hinweis" id="k-zahl"></span>
+        </div>
+        <div class="zeile">
+          <button class="knopf leicht" id="k-bereich" title="Mit der Maus ein Rechteck aufziehen und die Fotos darin zeigen">▭ Bereich auswählen</button>
+          <button class="knopf" id="k-ausschnitt" title="Alle Fotos im sichtbaren Kartenausschnitt in der Suche zeigen">Ausschnitt in der Suche zeigen</button>
+        </div>
+      </header>
+      <div class="landkarte-huelle">
+        <div id="landkarte"></div>
+        <div class="landkarte-hinweis" id="k-hinweis" hidden></div>
+        <aside class="landkarte-fotos" id="k-fotos" hidden>
+          <div class="zeile zwischen"><b id="k-fotos-titel"></b><button class="knopf leicht" id="k-fotos-zu" title="Schließen">✕</button></div>
+          <div class="hinweis" id="k-fotos-ort"></div>
+          <button class="knopf primaer breit" id="k-fotos-suche">In der Suche zeigen</button>
+          <div class="k-fotos-gitter" id="k-fotos-gitter"></div>
+        </aside>
+      </div>
     </section>
 
     <!-- ======================= Sortieren ======================= -->
@@ -246,6 +276,15 @@
             </select><small>Bei Problemen mit der Grafikkarte wechselt das Programm von selbst auf den Prozessor.</small></div>
           <div class="feld"><label>Wie sicher muss die Einordnung sein? <span id="e-schwelle-wert"></span></label>
             <input type="range" id="e-schwelle" min="0.5" max="4" step="0.25"><small>Höher = mehr Bilder landen in „Unklar“ und werden nicht falsch einsortiert.</small></div>
+          <h2 class="abstand">Karte</h2>
+          <label class="schalter"><input type="checkbox" id="e-karte-detail"><span></span>Kleine Karte beim Bild zeigen, wenn es Standortdaten hat</label>
+          <label class="schalter"><input type="checkbox" id="e-karte-online"><span></span>Kartenmaterial aus dem Internet laden (OpenStreetMap)</label>
+          <p class="hinweis">Ohne diese Einstellung zeigt die Karte nur Ländergrenzen, es geht nichts ins Internet.
+            Eingeschaltet lädt das Programm Kartenbilder von OpenStreetMap. Dabei sieht der Kartenserver deine IP-Adresse und
+            welche Kartenausschnitte du ansiehst, also ungefähr, wo deine Fotos entstanden sind. Fotos und Koordinaten werden
+            nicht gesendet. Geladene Kartenbilder bleiben im Datenordner und gehen danach auch ohne Internet.
+            <span id="e-karte-speicher"></span></p>
+          <button class="knopf leicht" id="e-karte-leeren">Gespeicherte Kartenbilder löschen</button>
           <h2 class="abstand">Status</h2>
           <div id="e-status" class="hinweis"></div>
         </div>
@@ -258,6 +297,9 @@
 <div class="dialog-huelle" id="dialog" hidden><div class="dialog"><h3 id="dialog-titel"></h3><div id="dialog-text"></div>
   <div class="zeile rechts"><button class="knopf leicht" id="dialog-nein">Abbrechen</button><button class="knopf" id="dialog-drittes" hidden></button><button class="knopf primaer" id="dialog-ja">OK</button></div></div></div>
 <div class="toast" id="toast"></div>
+<script src="vendor/leaflet.js"></script>
+<script src="vendor/leaflet.markercluster.js"></script>
 <script src="app.js"></script>
+<script src="karte.js"></script>
 </body>
 </html>
