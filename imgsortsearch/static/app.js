@@ -767,32 +767,60 @@ async function ladePersonen() {
   });
 }
 
-/* Vorschläge: zwei Gruppen derselben Person */
+/* Vorschläge: Gruppen, die zu einer Person gehören könnten (je Person auf einmal entscheiden) */
+let vorschlaegeAus = false;
+try { vorschlaegeAus = sessionStorage.getItem("vorschlaegeAus") === "1"; } catch { /* egal */ }
 async function ladeVorschlaege() {
+  if (vorschlaegeAus) { $("#personen-vorschlaege").hidden = true; return; }
   const r = await api("/api/personen/vorschlaege");
-  const v = r.vorschlaege;
-  $("#personen-vorschlaege").hidden = !v.length;
-  $("#pv-anzahl").textContent = v.length ? `${v.length} Vorschläge` : "";
-  const karte = (p) => `<div class="pv-person"><img src="/api/gesicht/${p.titel_gesicht}" alt="">
-    <span>${p.name ? esc(p.name) : "unbenannt"}</span><small>${p.bilder} Bilder</small></div>`;
-  $("#pv-liste").innerHTML = v.map((x, i) => `<div class="vorschlag" data-i="${i}">${karte(x.a)}<span class="pv-gleich">=</span>${karte(x.b)}
-    <div class="pv-knoepfe"><button class="knopf" data-ja>Ja, dieselbe</button><button class="knopf leicht" data-nein>Nein</button></div></div>`).join("");
+  $("#personen-vorschlaege").hidden = !r.gruppen.length;
+  $("#pv-anzahl").textContent = r.offen ? `noch ${r.offen} Gruppen offen` : "";
+  const name = (p) => p.name ? esc(p.name) : "unbenannt";
+  $("#pv-liste").innerHTML = r.gruppen.map((g, i) => `<div class="vorschlag" data-i="${i}">
+    <div class="pv-person pv-anker"><img src="/api/gesicht/${g.person.titel_gesicht}" alt="" data-p="${g.person.id}">
+      <span>${name(g.person)}</span><small>${g.person.bilder} Bilder</small></div>
+    <div class="pv-kandidaten">${g.kandidaten.map((k) => `<label class="pv-person pv-kandidat" title="Ähnlichkeit ${Math.round(k.aehnlichkeit * 100)} %">
+      <img src="/api/gesicht/${k.titel_gesicht}" alt="" data-p="${k.id}"><input type="checkbox" checked data-k="${k.id}">
+      <small>${k.bilder} Bilder</small></label>`).join("")}</div>
+    <div class="pv-knoepfe"><button class="knopf" data-ok>Übernehmen</button><button class="knopf leicht" data-keine>Keine davon</button></div></div>`).join("");
   $$("#pv-liste .vorschlag").forEach((el) => {
-    const x = v[+el.dataset.i];
-    $("[data-ja]", el).onclick = async () => {
+    const g = r.gruppen[+el.dataset.i];
+    const senden = async (alleNein) => {
+      const ja = [], nein = [];
+      $$("input[data-k]", el).forEach((c) => ((c.checked && !alleNein) ? ja : nein).push(+c.dataset.k));
       try {
-        await api("/api/personen/zusammenfuehren", { json: { ziel: x.a.id, quellen: [x.b.id] } });
-        toast(`Zusammengeführt${x.a.name || x.b.name ? ` zu ${x.a.name || x.b.name}` : ""}`);
+        await api("/api/personen/vorschlag", { json: { ziel: g.person.id, ja, nein } });
+        toast(ja.length ? `${ja.length} Gruppe(n) zu ${g.person.name || "dieser Person"} hinzugefügt` : "Gemerkt: andere Personen");
         await ladePersonen();
       } catch (e) { toast(e.message, true); }
     };
-    $("[data-nein]", el).onclick = async () => {
-      try { await api("/api/personen/verschieden", { json: { a: x.a.id, b: x.b.id } }); el.remove(); }
-      catch (e) { toast(e.message, true); }
-    };
-    $$("img", el).forEach((img, k) => { img.onclick = () => { const p = k ? x.b : x.a; personOeffnen(p.id, p.name || "").catch((e) => toast(e.message, true)); }; });
+    $("[data-ok]", el).onclick = () => senden(false);
+    $("[data-keine]", el).onclick = () => senden(true);
+    // Klick aufs Gesicht: oben vergleichen (feste Höhe, die Liste springt nicht)
+    $$("img[data-p]", el).forEach((img) => {
+      img.onclick = (e) => {
+        e.preventDefault();
+        const k = g.kandidaten.find((x) => x.id === +img.dataset.p) || g.kandidaten[0];
+        vergleichZeigen(g.person, k).catch((err) => toast(err.message, true));
+      };
+    });
   });
+  if (r.gruppen.length) vergleichZeigen(r.gruppen[0].person, r.gruppen[0].kandidaten[0]).catch(() => {});
 }
+async function vergleichZeigen(a, b) {
+  const [ga, gb] = await Promise.all([api(`/api/personen/${a.id}/typisch`), api(`/api/personen/${b.id}/typisch`)]);
+  const reihe = (liste) => liste.gesichter.map((id) => `<img src="/api/gesicht/${id}" alt="" loading="lazy">`).join("");
+  $("#pv-v-a").textContent = `${a.name || "Gruppe"} (${a.bilder} Bilder)`;
+  $("#pv-v-b").textContent = `Vorschlag (${b.bilder} Bilder, ${Math.round(b.aehnlichkeit * 100)} % ähnlich)`;
+  $("#pv-v-a-bilder").innerHTML = reihe(ga);
+  $("#pv-v-b-bilder").innerHTML = reihe(gb);
+  $$("#pv-liste .pv-kandidat").forEach((l) => l.classList.toggle("im-vergleich", +$("input", l).dataset.k === b.id));
+}
+$("#pv-spaeter").onclick = () => {
+  vorschlaegeAus = true;
+  try { sessionStorage.setItem("vorschlaegeAus", "1"); } catch { /* egal */ }
+  $("#personen-vorschlaege").hidden = true;
+};
 
 /* Gesichter einer Person: Fehler finden und korrigieren */
 const PD = { id: null, name: "", gesichter: [], wahl: new Set(), letzter: null };

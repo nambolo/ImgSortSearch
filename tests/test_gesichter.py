@@ -362,9 +362,9 @@ def test_neue_teilgruppe_kommt_zur_benannten_person(db):
 
 def test_vorschlag_und_nein_merken(db):
     rng = np.random.default_rng(14)
-    faces = _zwei_ansichten(rng, 8, naehe=0.45)  # zu unsicher für automatisch, aber vorschlagswürdig
+    faces = _zwei_ansichten(rng, 8, naehe=0.52)  # zu unsicher für automatisch, aber vorschlagswürdig
     with db.verbindung() as v:
-        a = v.execute("INSERT INTO personen (name, fest) VALUES (NULL, 1)").lastrowid
+        a = v.execute("INSERT INTO personen (name, fest) VALUES ('Anna', 1)").lastrowid
         b = v.execute("INSERT INTO personen (name, fest) VALUES (NULL, 1)").lastrowid
         for x in faces[:8]:
             _gesicht(v, db, x, person=a)
@@ -374,12 +374,50 @@ def test_vorschlag_und_nein_merken(db):
             _gesicht(v, db, x)
     personen.neu_gruppieren(db)
     vs = personen.vorschlaege(db)
-    assert {(x["a"]["id"], x["b"]["id"]) for x in vs} in ({(a, b)}, {(b, a)})
-    personen.verschieden_merken(db, a, b)
-    assert personen.vorschlaege(db) == []
-    # "Ja": zusammenführen, der Vorschlag verschwindet
+    assert vs["offen"] == 1
+    assert vs["gruppen"][0]["person"]["id"] == a  # die benannte Person ist der Anker
+    assert [k["id"] for k in vs["gruppen"][0]["kandidaten"]] == [b]
+    # Häkchen weg = "Nein": nie wieder fragen
+    personen.vorschlag_anwenden(db, a, [], [b])
+    assert personen.vorschlaege(db)["gruppen"] == []
+    # von Hand trotzdem zusammenführen geht
     personen.zusammenfuehren(db, a, [b])
     assert db.eins("SELECT COUNT(*) n FROM gesichter WHERE person_id=?", (a,))["n"] == 16
+
+
+def test_vorschlaege_je_person_gebuendelt_und_ohne_winzlinge(db):
+    """Drei Teilgruppen einer Person: eine Frage mit zwei Kandidaten statt drei Paaren.
+    Zwei Mini-Gruppen (2 Bilder) von Fremden werden gar nicht erst vorgeschlagen."""
+    rng = np.random.default_rng(16)
+    c = rng.normal(size=DIM)
+    c /= np.linalg.norm(c)
+    teile = []
+    for _ in range(3):
+        r = rng.normal(size=DIM)
+        r -= (r @ c) * c
+        r /= np.linalg.norm(r)
+        teile.append(0.72 * c + np.sqrt(1 - 0.72 ** 2) * r)
+    mini = _zwei_ansichten(rng, 2, naehe=0.6)
+    with db.verbindung() as v:
+        pids = []
+        for k, t in enumerate(teile):
+            pid = v.execute("INSERT INTO personen (name, fest) VALUES (NULL, 1)").lastrowid
+            pids.append(pid)
+            for _ in range(6 + k):
+                x = t + rng.normal(size=DIM) * 0.8 / np.sqrt(DIM)
+                _gesicht(v, db, x / np.linalg.norm(x), person=pid)
+        for k in range(2):
+            pid = v.execute("INSERT INTO personen (name, fest) VALUES (NULL, 1)").lastrowid
+            for x in mini[2 * k:2 * k + 2]:
+                _gesicht(v, db, x, person=pid)
+    vs = personen.vorschlaege(db)
+    assert len(vs["gruppen"]) == 1 and vs["offen"] == 2
+    g = vs["gruppen"][0]
+    assert g["person"]["id"] == pids[2]  # größte Teilgruppe ist der Anker
+    assert {k["id"] for k in g["kandidaten"]} == set(pids[:2])
+    personen.vorschlag_anwenden(db, pids[2], pids[:2], [])
+    assert personen.vorschlaege(db)["gruppen"] == []
+    assert db.eins("SELECT COUNT(*) n FROM gesichter WHERE person_id=?", (pids[2],))["n"] == 21
 
 
 def test_vereinen_respektiert_verboten():

@@ -30,7 +30,7 @@ STANDARD = {
     "suche": 0.40,         # Suche per Referenzfoto
     "min_qualitaet": 0.35,  # ab hier darf ein Gesicht neue Gruppen bilden
     "vereinen": 0.55,      # Gruppenzentren so ähnlich: automatisch dieselbe Person
-    "vorschlag": 0.35,     # ab hier "Ist das dieselbe Person?" vorschlagen
+    "vorschlag": 0.45,     # ab hier "Ist das dieselbe Person?" vorschlagen
 }
 # alter Name des Werts, als die Grenze noch fürs alte Modell (SFace) galt
 SUCH_SCHWELLE = STANDARD["suche"]
@@ -382,46 +382,65 @@ def neu_gruppieren(db: Datenbank, einstellungen: dict | None = None) -> dict:
             "personen": int(len(set(person[person > 0].tolist())))}
 
 
-def vorschlaege(db: Datenbank, einstellungen: dict | None = None, limit: int = 12) -> list[dict]:
-    """Paare von Gruppen, die vermutlich dieselbe Person zeigen: "Ist das dieselbe Person?".
+def vorschlaege(db: Datenbank, einstellungen: dict | None = None, limit: int = 8,
+                je_person: int = 12) -> dict:
+    """"Gehören diese Gruppen auch zu X?": je Person die Gruppen, die ihr ähneln.
 
-    Nicht vorgeschlagen werden zwei Personen mit verschiedenen Namen und Paare, bei denen der
-    Nutzer schon "Nein" gesagt hat."""
+    Jede Gruppe wird nur einmal gezeigt, bei der Person, der sie am meisten ähnelt (benannte und
+    größere Personen bevorzugt). So muss man nicht Paar für Paar klicken. Nicht vorgeschlagen:
+    zwei Personen mit Namen, Paare mit "Nein", und zwei winzige Gruppen (meist Fremde im Hintergrund)."""
     s = schwellen(einstellungen)
-    zeilen = db.abfrage("SELECT g.person_id, g.vektor, p.name FROM gesichter g JOIN personen p ON p.id=g.person_id "
-                        "WHERE g.ignoriert=0 AND g.modell=?", (GESICHT_KENNUNG,))
+    zeilen = db.abfrage("SELECT g.person_id, g.vektor FROM gesichter g "
+                        "WHERE g.person_id IS NOT NULL AND g.ignoriert=0 AND g.modell=?", (GESICHT_KENNUNG,))
     summen: dict[int, np.ndarray] = {}
-    anzahl: dict[int, int] = {}
-    namen: dict[int, str | None] = {}
     for z in zeilen:
         v = blob_zu_vektor(z["vektor"])
-        v = v / (np.linalg.norm(v) + 1e-9)
-        summen[z["person_id"]] = summen.get(z["person_id"], 0) + v
-        anzahl[z["person_id"]] = anzahl.get(z["person_id"], 0) + 1
-        namen[z["person_id"]] = z["name"]
-    pids = [p for p in summen if anzahl[p] >= 2 or namen[p]]
+        summen[z["person_id"]] = summen.get(z["person_id"], 0) + v / (np.linalg.norm(v) + 1e-9)
+    liste = {p["id"]: p for p in personen_liste(db, min_anzahl=1)}
+    pids = [p for p in summen if p in liste and (liste[p]["bilder"] >= 2 or liste[p]["name"])]
+    leer = {"gruppen": [], "offen": 0}
     if len(pids) < 2:
-        return []
+        return leer
     zentren = _norm(np.stack([summen[p] for p in pids]))
     sims = zentren @ zentren.T
+    np.fill_diagonal(sims, -1)
     verschieden = _verschieden(db)
-    paare = []
-    for i, j in zip(*np.where(np.triu(sims, 1) >= s["vorschlag"])):
-        a, b = pids[i], pids[j]
-        if (namen[a] and namen[b]) or _paar(a, b) in verschieden:
-            continue
-        paare.append((float(sims[i, j]), a, b))
-    paare.sort(reverse=True)
-    liste = {p["id"]: p for p in personen_liste(db, min_anzahl=1)}
-    erg = []
-    for sim, a, b in paare:
-        if a in liste and b in liste:
-            # benannte bzw. größere Gruppe zuerst: sie bleibt beim Zusammenführen
-            x, y = sorted((liste[a], liste[b]), key=lambda p: (p["name"] is None, -p["bilder"]))
-            erg.append({"a": x, "b": y, "aehnlichkeit": round(sim, 3)})
-        if len(erg) >= limit:
+
+    def rang(p):  # wer ist "Anker": benannt vor unbenannt, dann mehr Bilder
+        return (liste[p]["name"] is not None, liste[p]["bilder"], -p)
+
+    anker: dict[int, list[tuple[float, int]]] = {}
+    for j, b in enumerate(pids):
+        if liste[b]["name"]:
+            continue  # benannte Gruppen werden nicht anderen zugeschlagen, sie sind selbst Anker
+        beste = None
+        for i in np.argsort(-sims[:, j]):
+            sim = float(sims[i, j])
+            if sim < s["vorschlag"]:
+                break
+            a = pids[i]
+            if rang(a) <= rang(b) or _paar(a, b) in verschieden:
+                continue
+            if max(liste[a]["bilder"], liste[b]["bilder"]) < 3:
+                continue
+            beste = (sim, a)
             break
-    return erg
+        if beste:
+            anker.setdefault(beste[1], []).append((beste[0], b))
+    gruppen = []
+    for a, kandidaten in anker.items():
+        kandidaten.sort(reverse=True)
+        gruppen.append({"person": liste[a],
+                        "kandidaten": [dict(liste[b], aehnlichkeit=round(sim, 3)) for sim, b in kandidaten[:je_person]]})
+    gruppen.sort(key=lambda g: (g["person"]["name"] is None, -len(g["kandidaten"]), -g["person"]["bilder"]))
+    return {"gruppen": gruppen[:limit], "offen": sum(len(k) for k in anker.values())}
+
+
+def vorschlag_anwenden(db: Datenbank, ziel: int, ja: list[int], nein: list[int]) -> int:
+    """Angehakte Gruppen zur Person, die übrigen als "verschieden" merken (wird nie wieder gefragt)."""
+    for b in nein:
+        verschieden_merken(db, ziel, b)
+    return zusammenfuehren(db, ziel, ja) if ja else ziel
 
 
 def verschieden_merken(db: Datenbank, a: int, b: int) -> None:
