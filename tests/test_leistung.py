@@ -113,8 +113,25 @@ def _fake_ort(monkeypatch, dml=True, kaputt_ab=None, abweichung=0.0):
 def test_gesichter_auf_dml(monkeypatch):
     _fake_ort(monkeypatch)
     g = modelle.GesichtsModell(beschleunigung="auto")
-    assert g.geraet_name.startswith("DirectML")
+    assert g.geraet_name == "DirectML (Grafikkarte)"
     assert g.det.get_providers()[0] == "DmlExecutionProvider"
+    assert g.rec.get_providers()[0] == "DmlExecutionProvider"
+
+
+def test_gesichter_nur_ein_modell_auf_dml(monkeypatch):
+    """Kann DirectML nur eines der beiden Modelle, läuft nur das andere auf dem Prozessor."""
+    _fake_ort(monkeypatch)
+    alt = _Sitzung.run
+
+    def run(self, _, eingaben):
+        if self.anbieter[0] == "DmlExecutionProvider" and eingaben["x"].shape[-1] == 112:
+            raise RuntimeError("BatchNormalization: Falscher Parameter")
+        return alt(self, _, eingaben)
+    monkeypatch.setattr(_Sitzung, "run", run)
+    g = modelle.GesichtsModell(beschleunigung="auto")
+    assert g.det.get_providers()[0] == "DmlExecutionProvider"
+    assert g.rec.get_providers() == ["CPUExecutionProvider"]
+    assert g.geraet_name == "DirectML (Finden), Prozessor (Wiedererkennen)"
 
 
 def test_gesichter_cpu_wenn_gewuenscht_oder_ohne_dml(monkeypatch):
@@ -137,7 +154,8 @@ def test_gesichter_dml_faellt_spaeter_aus(monkeypatch):
     g.det.kaputt = True
     aus = g._ausfuehren("det", np.zeros((1, 3, 8, 8), np.float32))
     assert aus[0].shape == (1, 4)
-    assert g.geraet_name.startswith("CPU (Grafikkarte fehlgeschlagen")
+    assert g.det.get_providers() == ["CPUExecutionProvider"]
+    assert g.geraet_name == "Prozessor (Finden), DirectML (Wiedererkennen)"
 
 
 # ------------------------------------------------------------------ DirectML-Anpassungen
@@ -200,3 +218,31 @@ def test_det_feste_groesse(tmp_path):
     assert b_s.get_inputs()[0].shape == [1, 3, 8, 8]
     assert np.array_equal(a, b_s.run(None, {"x": x})[0])
     assert modelle.det_feste_groesse(quelle, 8) == fest   # zweites Mal aus dem Zwischenspeicher
+
+
+def test_rec_ohne_flache_batchnorm(tmp_path):
+    import pytest
+    onnx = pytest.importorskip("onnx")
+    ort = pytest.importorskip("onnxruntime")
+    from onnx import TensorProto, helper, numpy_helper
+    rng = np.random.default_rng(0)
+    init = [numpy_helper.from_array(rng.normal(size=(6, 4)).astype(np.float32), "w"),
+            numpy_helper.from_array(rng.normal(size=6).astype(np.float32), "b")]
+    for n, wert in (("g", rng.normal(size=6)), ("be", rng.normal(size=6)), ("mu", rng.normal(size=6)),
+                    ("var", rng.uniform(0.5, 2, 6))):
+        init.append(numpy_helper.from_array(wert.astype(np.float32), n))
+    knoten = [helper.make_node("Gemm", ["x", "w", "b"], ["h"], transB=1),
+              helper.make_node("BatchNormalization", ["h", "g", "be", "mu", "var"], ["y"], epsilon=1e-5)]
+    g = helper.make_graph(knoten, "mini", [helper.make_tensor_value_info("x", TensorProto.FLOAT, ["N", 4])],
+                          [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 6])], init)
+    m = helper.make_model(g, opset_imports=[helper.make_opsetid("", 11)])
+    m.ir_version = 6
+    quelle = tmp_path / "rec.onnx"
+    onnx.save(m, str(quelle))
+    neu = modelle.rec_ohne_flache_batchnorm(quelle)
+    assert neu.name == "rec_dml.onnx"
+    assert not any(n.op_type == "BatchNormalization" for n in onnx.load(str(neu)).graph.node)
+    x = rng.normal(size=(3, 4)).astype(np.float32)
+    a = ort.InferenceSession(str(quelle), providers=["CPUExecutionProvider"]).run(None, {"x": x})[0]
+    b = ort.InferenceSession(str(neu), providers=["CPUExecutionProvider"]).run(None, {"x": x})[0]
+    assert np.allclose(a, b, atol=1e-5)
