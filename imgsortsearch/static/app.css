@@ -211,3 +211,9 @@ main { min-width: 0; min-height: 0; position: relative; }
 .toast.zeigen { opacity: 1; transform: none; }
 .toast.fehler { border-color: var(--schlecht); }
 [hidden] { display: none !important; }
+
+/* Auswahlleiste darf die letzten Einträge und die Bilddetails nicht verdecken */
+.liste, .detail { padding-bottom: 80px; }
+.quelle.fehlt span { color: var(--schlecht); }
+.quelle.fehlt small { color: var(--schlecht); margin-left: 8px; white-space: nowrap; }
+#index-knopf:disabled { opacity: .7; cursor: progress; }
