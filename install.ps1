@@ -111,6 +111,7 @@ if ($NurExiftool) {
 # Feste Versionen, damit die Installation in einem Jahr noch genauso funktioniert
 $UvVersion          = "0.13.10"
 $TorchDirectml      = "torch-directml==0.2.5.dev240914"   # braucht genau torch 2.4.1 / torchvision 0.19.1
+$OnnxDirectml       = "onnxruntime-directml==1.20.1"      # Gesichtserkennung auf der Grafikkarte (AMD/Intel)
 
 Schritt "1/6  uv (Paketverwaltung) laden"
 $uv = Join-Path $UvDir "uv.exe"
@@ -147,7 +148,7 @@ $merker = Join-Path $Umg "beschleunigung.txt"
 $vorher = if (Test-Path $merker) { "$(Get-Content $merker -Raw)".Trim() } else { "" }
 if ($vorher -and $vorher -ne $Beschleunigung) {
     Write-Host "Vorher installiert: $vorher, jetzt: $Beschleunigung. Tausche PyTorch aus."
-    & $uv pip uninstall --python $Py torch torchvision torch-directml
+    & $uv pip uninstall --python $Py torch torchvision torch-directml onnxruntime-directml
 }
 switch ($Beschleunigung) {
     "nvidia" {
@@ -179,7 +180,21 @@ Set-Content -Path $constraints -Value $zeilen -Encoding ASCII
 Schritt "4/6  Programmpakete installieren"
 $torchIndex = @()
 if ($Beschleunigung -eq "nvidia") { $torchIndex = @("--extra-index-url", "https://download.pytorch.org/whl/cu126", "--index-strategy", "unsafe-best-match") }
-& $uv pip install --python $Py -r (Join-Path $Root "requirements.txt") -c $constraints @torchIndex
+$onnx = @()
+if ($Beschleunigung -eq "directml") {
+    # onnxruntime-directml ersetzt onnxruntime (gleicher Modulname, beide zusammen vertragen sich nicht).
+    # Die "never"-Bedingung streicht onnxruntime aus allen Abhaengigkeiten (z. B. von rapidocr).
+    $override = Join-Path $Umg "override.txt"
+    Set-Content -Path $override -Value 'onnxruntime ; sys_platform == "never"' -Encoding ASCII
+    # Abfrage ueber Python statt "uv pip show ... 2>`$null": Umleiten von stderr bricht unter PowerShell 5.1 mit "Stop" ab
+    $hatOnnx = & $Py -c "import importlib.metadata as m; print(int(any((d.metadata['Name'] or '').lower() == 'onnxruntime' for d in m.distributions())))"
+    if ("$hatOnnx".Trim() -eq "1") {
+        Write-Host "Tausche onnxruntime gegen onnxruntime-directml (Gesichter auf der Grafikkarte)."
+        & $uv pip uninstall --python $Py onnxruntime onnxruntime-directml
+    }
+    $onnx = @($OnnxDirectml, "--override", $override)
+}
+& $uv pip install --python $Py -r (Join-Path $Root "requirements.txt") -c $constraints @torchIndex @onnx
 Pruefe "Paketinstallation"
 
 Schritt "5/6  exiftool laden"

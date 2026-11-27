@@ -128,7 +128,13 @@ def bild_laden(pfad: Path, max_kante: int | None = None) -> Image.Image:
         try:
             img = Image.open(pfad)
             if max_kante:
-                img.draft("RGB", (max_kante, max_kante))  # schnelles JPEG-Verkleinern
+                # Schnelles JPEG-Verkleinern schon beim Dekodieren (1/2, 1/4, 1/8). draft() liefert mindestens
+                # die gewünschte Größe in BEIDEN Richtungen; mit einem Quadrat würde ein 4000x3000-Foto deshalb
+                # voll dekodiert (Höhe 1500 < 2000). Darum die Zielgröße im Seitenverhältnis angeben.
+                w, h = img.size
+                f = max_kante / max(w, h, 1)
+                if f < 1:
+                    img.draft("RGB", (max(1, int(w * f)), max(1, int(h * f))))
             img.load()
         except Exception:
             img = None
@@ -393,24 +399,83 @@ class GesichtsModell:
     kennung = GESICHT_KENNUNG
     dimension = 512
 
-    def __init__(self, min_groesse: int = 32, min_score: float = 0.6, eingabe: int = 640):
+    def __init__(self, min_groesse: int = 32, min_score: float = 0.6, eingabe: int = 640,
+                 beschleunigung: str = "cpu"):
         import cv2
-        import onnxruntime as ort
         self.cv2 = cv2
-        det, rec = gesichtsmodelle_laden()
-        opt = ort.SessionOptions()
-        opt.intra_op_num_threads = max(1, (os.cpu_count() or 2) - 1)
-        opt.log_severity_level = 3
-        anbieter = ["CPUExecutionProvider"]
-        self.det = ort.InferenceSession(str(det), opt, providers=anbieter)
-        self.rec = ort.InferenceSession(str(rec), opt, providers=anbieter)
-        self.det_in = self.det.get_inputs()[0].name
-        self.rec_in = self.rec.get_inputs()[0].name
+        self._dateien = gesichtsmodelle_laden()
         self.min_groesse = min_groesse
         self.min_score = min_score
         self.eingabe = eingabe
         self._anker: dict = {}
         self._lock = threading.Lock()
+        self.geraet_name = "CPU (Prozessor)"
+        if (beschleunigung or "auto").lower() in ("auto", "directml") and self._dml_versuchen():
+            return
+        self._sitzungen(["CPUExecutionProvider"])
+
+    def _sitzungen(self, anbieter: list) -> None:
+        import onnxruntime as ort
+        det, rec = self._dateien
+        opt = ort.SessionOptions()
+        opt.log_severity_level = 3
+        if anbieter[0] == "CPUExecutionProvider":
+            opt.intra_op_num_threads = max(1, (os.cpu_count() or 2) - 1)
+        else:  # DirectML verlangt das so
+            opt.enable_mem_pattern = False
+            opt.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        self.det = ort.InferenceSession(str(det), opt, providers=anbieter)
+        self.rec = ort.InferenceSession(str(rec), opt, providers=anbieter)
+        self.det_in = self.det.get_inputs()[0].name
+        self.rec_in = self.rec.get_inputs()[0].name
+
+    def _dml_versuchen(self) -> bool:
+        """Gesichter auf der Grafikkarte (onnxruntime-directml, nur AMD/Intel-Installation). Klappt das nicht
+        oder rechnet es falsch, bleibt alles auf dem Prozessor."""
+        try:
+            import onnxruntime as ort
+            if "DmlExecutionProvider" not in ort.get_available_providers():
+                return False
+            for optionen in ({"performance_preference": "high_performance", "device_filter": "gpu"}, {}):
+                try:
+                    self._sitzungen([("DmlExecutionProvider", optionen), "CPUExecutionProvider"])
+                    if self.det.get_providers()[0] == "DmlExecutionProvider":
+                        break
+                except Exception as e:
+                    log.info("Gesichter mit DirectML (%s) nicht möglich: %s", optionen or "Standard", e)
+            else:
+                return False
+            # Probe: dieselben Eingaben auf Grafikkarte und Prozessor müssen dasselbe ergeben
+            rng = np.random.default_rng(0)
+            det_x = rng.uniform(-1, 1, (1, 3, self.eingabe, self.eingabe)).astype(np.float32)
+            rec_x = rng.uniform(-1, 1, (2, 3, 112, 112)).astype(np.float32)
+            gpu = (self.det.run(None, {self.det_in: det_x})[0], self.rec.run(None, {self.rec_in: rec_x})[0])
+            dml_det, dml_rec = self.det, self.rec
+            self._sitzungen(["CPUExecutionProvider"])
+            cpu = (self.det.run(None, {self.det_in: det_x})[0], self.rec.run(None, {self.rec_in: rec_x})[0])
+            if not all(np.allclose(a, b, atol=2e-2, rtol=2e-2) for a, b in zip(gpu, cpu)):
+                log.warning("Gesichter mit DirectML rechnen abweichend, bleibe auf dem Prozessor")
+                return False
+            self.det, self.rec = dml_det, dml_rec
+            self.geraet_name = "DirectML (Grafikkarte)"
+            log.info("Gesichtserkennung läuft auf der Grafikkarte (DirectML)")
+            return True
+        except Exception as e:
+            log.warning("Gesichter mit DirectML nicht möglich, nutze den Prozessor: %s", e)
+            return False
+
+    def _ausfuehren(self, sitzung: str, eingabe: np.ndarray):
+        s = getattr(self, sitzung)
+        name = self.det_in if sitzung == "det" else self.rec_in
+        try:
+            return s.run(None, {name: eingabe})
+        except Exception as e:
+            if self.geraet_name.startswith("CPU"):
+                raise
+            log.warning("Gesichter auf der Grafikkarte fehlgeschlagen, weiter auf dem Prozessor: %s", e)
+            self._sitzungen(["CPUExecutionProvider"])
+            self.geraet_name = f"CPU (Grafikkarte fehlgeschlagen: {str(e)[:120]})"
+            return getattr(self, sitzung).run(None, {name: eingabe})
 
     # --- Erkennung
     def _anker_punkte(self, h: int, w: int, schritt: int) -> np.ndarray:
@@ -430,7 +495,7 @@ class GesichtsModell:
         leinwand = np.zeros((n, n, 3), dtype=np.float32)
         leinwand[:nh, :nw] = cv2.resize(rgb, (nw, nh)).astype(np.float32)
         blob = ((leinwand - 127.5) / 128.0).transpose(2, 0, 1)[None]
-        aus = self.det.run(None, {self.det_in: blob})
+        aus = self._ausfuehren("det", np.ascontiguousarray(blob))
         boxen, scores, punkte = [], [], []
         for i, schritt in enumerate((8, 16, 32)):
             s = aus[i].reshape(-1)
@@ -457,7 +522,7 @@ class GesichtsModell:
 
     def _merkmale(self, ausschnitte: list[np.ndarray]) -> np.ndarray:
         x = ((np.stack(ausschnitte).astype(np.float32) - 127.5) / 127.5).transpose(0, 3, 1, 2)
-        v = self.rec.run(None, {self.rec_in: x})[0].astype(np.float32)
+        v = self._ausfuehren("rec", np.ascontiguousarray(x))[0].astype(np.float32)
         return v / (np.linalg.norm(v, axis=1, keepdims=True) + 1e-9)
 
     @staticmethod
