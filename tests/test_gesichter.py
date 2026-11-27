@@ -250,3 +250,53 @@ def test_echtes_modell_trennt_personen():
                 assert vek[a][x] @ vek[a][y] > 0.45
         for b in namen[i + 1:]:
             assert max(float(x @ y) for x in vek[a] for y in vek[b]) < 0.3
+
+
+def test_zusammengefuehrte_personen_bleiben_beim_neugruppieren_zusammen(db):
+    """Dieselbe Person sieht in zwei Gruppen verschieden aus (Kind/Erwachsen): nach dem Zusammenführen
+    darf der nächste Indexlauf (Neugruppieren) die kleinere Gruppe nicht wieder abtrennen."""
+    rng = np.random.default_rng(11)
+    with db.verbindung() as v:
+        a = {_gesicht(v, db, x) for x in _person(rng, 12)}
+        b = {_gesicht(v, db, x) for x in _person(rng, 7)}
+    personen.neu_gruppieren(db)
+    g = _gruppen(db)
+    pa = next(p for p, m in g.items() if m == a)
+    pb = next(p for p, m in g.items() if m == b)
+    personen.umbenennen(db, pa, "Zoë")
+    personen.zusammenfuehren(db, pa, [pb])
+    for _ in range(2):
+        personen.neu_gruppieren(db)
+        assert _gruppen(db)[pa] == a | b
+    # neue Gesichter beider Erscheinungsbilder kommen zur Person
+    rng3 = np.random.default_rng(11)  # gleiches Zentrum wie Gruppe a
+    zentrum_a = rng3.normal(size=DIM)
+    with db.verbindung() as v:
+        neu = _gesicht(v, db, zentrum_a / np.linalg.norm(zentrum_a))
+    personen.neu_gruppieren(db)
+    assert neu in _gruppen(db)[pa]
+    # Umbenennen auf einen vorhandenen Namen führt ebenfalls dauerhaft zusammen
+    rng4 = np.random.default_rng(12)
+    with db.verbindung() as v:
+        c = {_gesicht(v, db, x) for x in _person(rng4, 6)}
+    personen.neu_gruppieren(db)
+    pc = next(p for p, m in _gruppen(db).items() if m == c)
+    assert personen.umbenennen(db, pc, "Zoë") == pa
+    personen.neu_gruppieren(db)
+    assert c <= _gruppen(db)[pa]
+
+
+def test_zusammenfuehren_mit_fehler_bleibt_korrigierbar(db):
+    rng = np.random.default_rng(13)
+    with db.verbindung() as v:
+        a = {_gesicht(v, db, x) for x in _person(rng, 8)}
+        b = {_gesicht(v, db, x) for x in _person(rng, 8)}
+    personen.neu_gruppieren(db)
+    g = _gruppen(db)
+    pa = next(p for p, m in g.items() if m == a)
+    pb = next(p for p, m in g.items() if m == b)
+    personen.zusammenfuehren(db, pa, [pb])
+    personen.nicht_diese_person(db, sorted(b))  # versehentlich zusammengeführt: alles von B wieder raus
+    personen.neu_gruppieren(db)
+    g = _gruppen(db)
+    assert g[pa] == a and not (b & g[pa])

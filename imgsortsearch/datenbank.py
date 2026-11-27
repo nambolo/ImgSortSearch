@@ -1,6 +1,7 @@
 """SQLite-Suchindex: Bilder, Gesichter, Personen, Bildvektoren."""
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 import unicodedata
@@ -83,6 +84,18 @@ def normalisiere(text: str) -> str:
     text = (text or "").lower().replace("ß", "ss")
     text = unicodedata.normalize("NFKD", text)
     return "".join(c for c in text if not unicodedata.combining(c))
+
+
+_OCR_SZ = re.compile(r"(?<=[a-zäöü])B(?=[a-zäöü])")
+
+
+def _ocr_varianten(text: str | None) -> str:
+    """Texterkennung liest ß oft als großes B ("StraBe", "GrüBe"). Dann zusätzlich die Schreibweise
+    mit ss aufnehmen, damit die Suche nach "Straße" das Bild findet."""
+    if not text:
+        return ""
+    ersetzt = _OCR_SZ.sub("ss", text)
+    return text if ersetzt == text else f"{text} {ersetzt}"
 
 
 def vektor_zu_blob(v: np.ndarray) -> bytes:
@@ -179,12 +192,23 @@ class Datenbank:
             updates = []
             for r in self.abfrage("SELECT id, pfad, kamera, tags, ocr_text, schlagwoerter, beschreibung, "
                                   f"beschreibung_en, beschreibung_lang, beschreibung_lang_en, zusatz, ort_such FROM bilder WHERE id IN ({platz})", teil):
-                teile = [r["pfad"], r["kamera"], r["tags"], r["ocr_text"], r["schlagwoerter"], r["beschreibung"],
+                teile = [r["pfad"], r["kamera"], r["tags"], _ocr_varianten(r["ocr_text"]), r["schlagwoerter"], r["beschreibung"],
                          r["beschreibung_en"], " ".join(personen.get(r["id"], [])), (r["zusatz"] or "").replace(",", " "),
                          r["ort_such"], r["beschreibung_lang"], r["beschreibung_lang_en"]]
                 updates.append((normalisiere(" ".join(t or "" for t in teile)), r["id"]))
             with self.verbindung() as v:
                 v.executemany("UPDATE bilder SET suchtext=? WHERE id=?", updates)
+
+    SUCHTEXT_STAND = "2"  # erhöhen, wenn sich der Aufbau des Suchtexts ändert (2: ß-Varianten aus der Texterkennung)
+
+    def suchtext_auffrischen(self) -> int:
+        """Suchtext aller Bilder einmal neu bilden, wenn er mit einer älteren Version erstellt wurde."""
+        if self.meta("suchtext_stand") == self.SUCHTEXT_STAND:
+            return 0
+        ids = [r["id"] for r in self.abfrage("SELECT id FROM bilder")]
+        self.suchtext_aktualisieren_viele(ids)
+        self.meta_setzen("suchtext_stand", self.SUCHTEXT_STAND)
+        return len(ids)
 
     # ---------------------------------------------------------- Zusatzkategorien
 

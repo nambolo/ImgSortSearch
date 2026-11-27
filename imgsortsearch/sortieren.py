@@ -230,6 +230,31 @@ def _sidecars(pfad: Path) -> list[Path]:
     return erg
 
 
+def _eigene_sicherungen(protokoll_ordner: Path) -> set[str]:
+    """Sicherungen (*_original), die frühere Läufe angelegt haben und die noch da sind
+    (ein Rückgängig verbraucht sie). So schlägt ein zweites Taggen nicht für jede Datei fehl."""
+    erg: dict[str, list] = {}
+    for datei in sorted(Path(protokoll_ordner).glob("protokoll-*.jsonl")) if Path(protokoll_ordner).is_dir() else []:
+        try:
+            for zeile in datei.read_text("utf-8").splitlines():
+                if '"eingebettet"' in zeile:
+                    e = json.loads(zeile)
+                    if e.get("op") == "eingebettet" and e.get("sicherung") and e.get("sicherung_stand"):
+                        erg[e["sicherung"]] = e["sicherung_stand"]
+        except (OSError, ValueError):
+            continue
+    return {s for s, stand in erg.items() if _stand(Path(s)) == stand}
+
+
+def _stand(p: Path) -> list | None:
+    """Größe und Änderungszeit: erkennt, ob eine Sicherung noch dieselbe Datei ist."""
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    return [st.st_size, st.st_mtime_ns]
+
+
 def ausfuehren(auftraege: list[Auftrag], s: dict, protokoll_ordner: Path, echt: bool = False,
                fortschritt=None) -> dict:
     """Führt die Aufträge aus (oder simuliert sie mit echt=False).
@@ -250,12 +275,17 @@ def ausfuehren(auftraege: list[Auftrag], s: dict, protokoll_ordner: Path, echt: 
         raise ValueError("Für eingebettete Tags wird exiftool gebraucht. Alternative: XMP-Datei daneben.")
 
     belegt: set[Path] = set()
+    eigene_sicherungen = _eigene_sicherungen(protokoll_ordner) if echt and tags_modus == "einbetten" else set()
     zaehler = {"ok": 0, "duplikat": 0, "fehlt": 0, "fehler": 0, "unveraendert": 0}
     vorschau, fehler, pfad_aenderungen = [], [], []
     prot_datei = prot = exif = None
     if echt:
         protokoll_ordner.mkdir(parents=True, exist_ok=True)
         prot_datei = protokoll_ordner / f"protokoll-{datetime.now():%Y%m%d-%H%M%S}.jsonl"
+        n = 1
+        while prot_datei.exists():  # zwei Läufe in derselben Sekunde: sonst nimmt Rückgängig beide zurück
+            n += 1
+            prot_datei = prot_datei.with_name(f"{prot_datei.stem.split('_')[0]}_{n}.jsonl")
         prot = open(prot_datei, "a", encoding="utf-8")
 
     def schreibe(e: dict):
@@ -314,14 +344,17 @@ def ausfuehren(auftraege: list[Auftrag], s: dict, protokoll_ordner: Path, echt: 
                         schreibe({"op": "sidecar", "ziel": str(xmp)})
                 elif art == "einbetten":
                     sicherung = modus != "kopieren"  # Kopien dürfen direkt geändert werden
-                    if sicherung and Path(str(neu) + "_original").exists():
+                    if sicherung and Path(str(neu) + "_original").exists() \
+                            and str(neu) + "_original" not in eigene_sicherungen:
                         raise RuntimeError("Sicherung von einem früheren Lauf vorhanden, bitte erst prüfen")
+                    # Eigene Sicherung eines früheren Laufs: exiftool lässt sie stehen, sie bleibt also
+                    # das unveränderte Original, und Rückgängig stellt diesen Zustand wieder her.
                     if exif is None:
                         exif = _Exiftool()
                     _einbetten(neu, a, sicherung, exif)
                     if sicherung:
                         schreibe({"op": "eingebettet", "ziel": str(neu), "sicherung": str(neu) + "_original",
-                                  "bild_id": a.bild_id})
+                                  "sicherung_stand": _stand(Path(str(neu) + "_original")), "bild_id": a.bild_id})
                         # Dateigröße hat sich geändert: Index nachführen, sonst wird neu analysiert
                         pfad_aenderungen.append((a.bild_id, str(neu)))
                 zaehler["ok"] += 1
