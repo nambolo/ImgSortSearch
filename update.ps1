@@ -25,13 +25,16 @@ function Ende($code) {
     exit $code
 }
 
+Write-Host "ImgSortSearch-Update (Skriptstand 2026-11-27b)" -ForegroundColor DarkGray
 try {
     # Laeuft das Programm noch? Dann koennen Dateien nicht sauber ersetzt werden.
     $py = Join-Path $Umg "venv\Scripts"
     $laeuft = @(Get-Process python, pythonw -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($py, [StringComparison]::OrdinalIgnoreCase) })
     if ($laeuft.Count) {
-        Write-Warning "ImgSortSearch laeuft noch. Bitte das Programmfenster schliessen."
-        Read-Host "Danach Enter druecken" | Out-Null
+        # Nicht waehrend eines Indexlaufs Programmdateien austauschen: lieber abbrechen
+        Write-Warning "ImgSortSearch laeuft noch (z. B. ein Indexlauf). Update wird nicht ausgefuehrt."
+        Write-Host "Bitte das Programm schliessen, wenn es fertig ist, und update.bat dann erneut starten."
+        Ende 0
     }
 
     Schritt "1/3  git suchen"
