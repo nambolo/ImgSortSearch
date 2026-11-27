@@ -33,6 +33,9 @@ class Zustand:
         self.m = Modelle(self.e)
         self.indexer = Indexer(self.db, self.e, self.m)
         self.indexer.nach_lauf.append(self._personen_zuordnen)
+        # neues Gesichtsmodell: nur den Gesichtsschritt neu einplanen, der Rest des Index bleibt
+        if personen.modellwechsel_pruefen(self.db):
+            log.info("Gesichtsmodell gewechselt, Gesichter werden beim nächsten Indexlauf neu erkannt")
         self.fenster = None           # pywebview-Fenster, falls vorhanden
         self.sortier_status = {"laeuft": False, "fertig": 0, "gesamt": 0, "ergebnis": None}
         self.dubletten_stop = threading.Event()
@@ -41,7 +44,7 @@ class Zustand:
 
     def _personen_zuordnen(self):
         self.indexer.status["meldung"] = "Gesichter werden Personen zugeordnet ..."
-        personen.neue_gesichter_zuordnen(self.db, float(self.e["gesichter"].get("schwelle", 0.40)))
+        personen.neu_gruppieren(self.db, self.e.werte)
 
 
 def erstelle_app(z: Zustand | None = None) -> FastAPI:
@@ -299,7 +302,7 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
             "SELECT kategorie, an FROM bild_zusatz WHERE bild_id=?", (bild_id,))}
         d["gesichter"] = [dict(g) for g in z.db.abfrage(
             "SELECT g.id, g.x, g.y, g.w, g.h, g.person_id, p.name FROM gesichter g "
-            "LEFT JOIN personen p ON p.id=g.person_id WHERE g.bild_id=?", (bild_id,))]
+            "LEFT JOIN personen p ON p.id=g.person_id WHERE g.bild_id=? AND g.ignoriert=0", (bild_id,))]
         return d
 
     @app.get("/api/vorschau/{bild_id}")
@@ -421,17 +424,16 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
 
     @app.get("/api/personen")
     def personen_liste():
-        return {"personen": personen.personen_liste(z.db)}
+        offen = z.db.eins("SELECT COUNT(*) AS n FROM bilder WHERE schritt_gesichter=0 AND fehler IS NULL")["n"]
+        return {"personen": personen.personen_liste(z.db), "gesichter_offen": offen if z.e["gesichter"]["aktiv"] else 0}
 
     @app.post("/api/personen/neu-gruppieren")
     def personen_gruppieren():
-        n = personen.neue_gesichter_zuordnen(z.db, float(z.e["gesichter"].get("schwelle", 0.40)))
-        return {"zugeordnet": n}
+        return personen.neu_gruppieren(z.db, z.e.werte)
 
     @app.post("/api/personen/{person_id}/name")
     def person_benennen(person_id: int, daten: dict = Body(...)):
-        personen.umbenennen(z.db, person_id, daten.get("name", ""))
-        return {"ok": True}
+        return {"id": personen.umbenennen(z.db, person_id, daten.get("name", ""))}
 
     @app.post("/api/personen/zusammenfuehren")
     def person_zusammen(daten: dict = Body(...)):
@@ -440,12 +442,33 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
 
     @app.get("/api/personen/{person_id}/gesichter")
     def person_gesichter(person_id: int):
-        return {"gesichter": [dict(g) for g in z.db.abfrage(
-            "SELECT id, bild_id FROM gesichter WHERE person_id=? ORDER BY score DESC LIMIT 300", (person_id,))]}
+        return {"gesichter": personen.person_gesichter(z.db, person_id)}
+
+    def _gesicht_ids(daten: dict) -> list[int]:
+        ids = [int(i) for i in daten.get("gesichter", [])]
+        if not ids:
+            raise HTTPException(400, "Keine Gesichter ausgewählt")
+        return ids
+
+    @app.post("/api/gesichter/nicht-diese-person")
+    def gesichter_ablehnen(daten: dict = Body(...)):
+        personen.nicht_diese_person(z.db, _gesicht_ids(daten))
+        return {"ok": True}
+
+    @app.post("/api/gesichter/kein-gesicht")
+    def gesichter_ignorieren(daten: dict = Body(...)):
+        personen.kein_gesicht(z.db, _gesicht_ids(daten))
+        return {"ok": True}
+
+    @app.post("/api/gesichter/zuweisen")
+    def gesichter_zuweisen(daten: dict = Body(...)):
+        pid = personen.zuweisen(z.db, _gesicht_ids(daten), int(daten.get("person") or 0) or None,
+                                daten.get("name", ""))
+        return {"person": pid}
 
     @app.post("/api/gesicht/{gesicht_id}/entfernen")
     def gesicht_entfernen(gesicht_id: int):
-        personen.gesicht_entfernen(z.db, gesicht_id)
+        personen.nicht_diese_person(z.db, [gesicht_id])
         return {"ok": True}
 
     @app.post("/api/personensuche")
@@ -459,7 +482,7 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
             return {"gesichter": [], "bilder": [], "gesamt": 0}
         gef.sort(key=lambda g: -g["w"] * g["h"])
         wahl = gef[min(gesicht, len(gef) - 1)]
-        rang = dict(personen.aehnliche_gesichter(z.db, wahl["vektor"]))
+        rang = dict(personen.aehnliche_gesichter(z.db, wahl["vektor"], personen.schwellen(z.e.werte)["suche"]))
         zeilen = z.db.abfrage(f"SELECT *, {KAT} AS kategorie FROM bilder WHERE id IN ({','.join('?' * len(rang))})",
                               list(rang)) if rang else []
         zeilen = sorted(zeilen, key=lambda r: -rang[r["id"]])

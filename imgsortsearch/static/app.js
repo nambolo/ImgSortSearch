@@ -570,20 +570,27 @@ $("#themen-speichern").onclick = async () => {
 /* ------------------------------------------------------------ Personen */
 
 const personenWahl = new Set();
+let personenDaten = [];
 async function ladePersonen() {
   const r = await api("/api/personen");
+  personenDaten = r.personen;
   personenWahl.clear();
   $("#personen-zusammen").disabled = true;
+  const h = $("#personen-hinweis");
+  h.hidden = !r.gesichter_offen;
+  h.innerHTML = r.gesichter_offen ? `<strong>Gesichter werden mit dem verbesserten Modell neu erkannt.</strong> Noch ${r.gesichter_offen.toLocaleString("de-DE")} Bilder offen.
+    Dafür links unten „Index erstellen“ starten (nur der Gesichtsschritt läuft, deine Namen bleiben). Bis dahin können Gruppen noch Fehler enthalten.` : "";
   $("#personen-gitter").innerHTML = r.personen.length ? r.personen.map((p) =>
     `<div class="person" data-id="${p.id}"><input type="checkbox" class="wahl" title="Zum Zusammenführen auswählen">
-      <img src="/api/gesicht/${p.titel_gesicht}" alt="" title="Alle Bilder dieser Person zeigen">
+      <img src="/api/gesicht/${p.titel_gesicht}" alt="" title="Gesichter ansehen und korrigieren">
       <input value="${esc(p.name || "")}" placeholder="Name eingeben">
-      <small>${p.bilder} Bilder</small></div>`).join("")
+      <small><a href="#" class="bilder-link" title="Alle Bilder dieser Person zeigen">${p.bilder} Bilder</a></small></div>`).join("")
     : `<div class="hinweis">Noch keine Gesichter gefunden. Sie werden beim Erstellen des Index erkannt.</div>`;
   $$(".person").forEach((el) => {
     const id = +el.dataset.id;
     const name = $("input:not(.wahl)", el);
-    $("img", el).onclick = () => personFilter(id, name.value);
+    $("img", el).onclick = () => personOeffnen(id, name.value).catch((e) => toast(e.message, true));
+    $(".bilder-link", el).onclick = (e) => { e.preventDefault(); personFilter(id, name.value); };
     name.onchange = async () => {
       try { await api(`/api/personen/${id}/name`, { json: { name: name.value } }); toast("Name gespeichert"); await ladePersonen(); }
       catch (e) { toast(e.message, true); }
@@ -595,9 +602,87 @@ async function ladePersonen() {
     };
   });
 }
+
+/* Gesichter einer Person: Fehler finden und korrigieren */
+const PD = { id: null, name: "", gesichter: [], wahl: new Set(), letzter: null };
+async function personOeffnen(id, name) {
+  const r = await api(`/api/personen/${id}/gesichter`);
+  Object.assign(PD, { id, name, gesichter: r.gesichter, letzter: null });
+  PD.wahl.clear();
+  $("#pd-titel").textContent = `${name || "Unbenannte Person"} · ${r.gesichter.length} Gesichter`;
+  $("#pd-gesichter").innerHTML = r.gesichter.map((g, i) => {
+    const s = g.aehnlichkeit;
+    const klasse = g.fest ? "fest" : s == null ? "" : s < 0.45 ? "unsicher" : "";
+    const titel = g.fest ? "von dir bestätigt" : s == null ? "noch nicht mit dem neuen Modell erkannt" : `Ähnlichkeit ${Math.round(s * 100)} %`;
+    return `<div class="gesicht ${klasse}" data-i="${i}" title="${titel}"><img src="/api/gesicht/${g.id}" alt="" loading="lazy">
+      <button class="lupe" title="Ganzes Bild ansehen">⤢</button></div>`;
+  }).join("") || `<div class="hinweis">Keine Gesichter.</div>`;
+  $$("#pd-gesichter .gesicht").forEach((el) => {
+    const i = +el.dataset.i;
+    el.onclick = (e) => {
+      if (e.target.classList.contains("lupe")) {
+        $("#vollbild-img").src = `/api/ansicht/${PD.gesichter[i].bild_id}?kante=2000`;
+        $("#vollbild").hidden = false;
+        return;
+      }
+      if (e.shiftKey && PD.letzter != null) {
+        const [a, b] = [Math.min(PD.letzter, i), Math.max(PD.letzter, i)];
+        for (let k = a; k <= b; k++) PD.wahl.add(PD.gesichter[k].id);
+      } else {
+        const gid = PD.gesichter[i].id;
+        PD.wahl.has(gid) ? PD.wahl.delete(gid) : PD.wahl.add(gid);
+      }
+      PD.letzter = i;
+      pdAuswahlZeigen();
+    };
+  });
+  $("#pd-ziel").innerHTML = `<option value="">Anderer Person zuweisen …</option>` +
+    personenDaten.filter((p) => p.name && p.id !== id).map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("") +
+    `<option value="neu">Neue Person …</option>`;
+  pdAuswahlZeigen();
+  $("#person-detail").hidden = false;
+  $("#person-detail").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+function pdAuswahlZeigen() {
+  $$("#pd-gesichter .gesicht").forEach((el) => el.classList.toggle("gewaehlt", PD.wahl.has(PD.gesichter[+el.dataset.i].id)));
+  const n = PD.wahl.size;
+  $("#pd-anzahl").textContent = n ? `${n} ausgewählt` : "Nichts ausgewählt";
+  ["#pd-nicht", "#pd-kein", "#pd-ziel"].forEach((s) => { $(s).disabled = !n; });
+}
+async function pdAktion(pfad, daten, meldung) {
+  try {
+    await api(pfad, { json: { gesichter: [...PD.wahl], ...daten } });
+    toast(meldung);
+    await ladePersonen();
+    if (personenDaten.some((p) => p.id === PD.id)) await personOeffnen(PD.id, PD.name);
+    else $("#person-detail").hidden = true;
+  } catch (e) { toast(e.message, true); }
+}
+$("#pd-nicht").onclick = () => pdAktion("/api/gesichter/nicht-diese-person", {}, "Entfernt. Ähnliche Gesichter werden dieser Person nicht mehr zugeordnet.");
+$("#pd-kein").onclick = () => pdAktion("/api/gesichter/kein-gesicht", {}, "Als „kein Gesicht“ markiert");
+$("#pd-ziel").onchange = async (e) => {
+  const wert = e.target.value;
+  e.target.value = "";
+  if (!wert) return;
+  if (wert === "neu") {
+    const ok = frage("Neue Person", `<input id="pd-neuer-name" placeholder="Name" style="width:100%">`, "Anlegen");
+    setTimeout(() => $("#pd-neuer-name")?.focus(), 50);
+    const ja = await ok;  // das Eingabefeld bleibt nach dem Schließen im Dialog stehen
+    const name = ($("#pd-neuer-name")?.value || "").trim();
+    if (ja !== true || !name) return;
+    return pdAktion("/api/gesichter/zuweisen", { name }, `${PD.wahl.size} Gesicht(er) zu ${name}`);
+  }
+  const p = personenDaten.find((x) => x.id === +wert);
+  return pdAktion("/api/gesichter/zuweisen", { person: +wert }, `${PD.wahl.size} Gesicht(er) zu ${p ? p.name : "Person"} verschoben`);
+};
+$("#pd-schliessen").onclick = () => { $("#person-detail").hidden = true; };
+$("#pd-bilder").onclick = () => personFilter(PD.id, PD.name);
 $("#personen-gruppieren").onclick = async () => {
-  try { const r = await api("/api/personen/neu-gruppieren", { method: "POST" }); toast(`${r.zugeordnet} Gesichter zugeordnet`); await ladePersonen(); }
-  catch (e) { toast(e.message, true); }
+  try {
+    const r = await api("/api/personen/neu-gruppieren", { method: "POST" });
+    toast(`${r.personen} Personen, ${r.zugeordnet} Gesichter zugeordnet`);
+    await ladePersonen();
+  } catch (e) { toast(e.message, true); }
 };
 $("#personen-zusammen").onclick = async () => {
   const ids = [...personenWahl];

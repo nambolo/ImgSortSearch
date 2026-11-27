@@ -13,7 +13,7 @@ from .indexer import Modelle
 def main() -> int:
     e = Einstellungen()
     m = Modelle(e)
-    schritte = [("Bildmodell (CLIP, ca. 1,1 GB)", m.clip), ("Gesichtserkennung (ca. 40 MB)", m.gesichter),
+    schritte = [("Bildmodell (CLIP, ca. 1,1 GB)", m.clip), ("Gesichtserkennung (ca. 290 MB Download)", m.gesichter),
                 ("Texterkennung", m.ocr)]
     if e["beschreibung"]["aktiv"]:
         schritte.append(("Bildbeschreibung und Übersetzer (ca. 1,3 GB)", m.beschreiber))
