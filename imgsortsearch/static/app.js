@@ -50,7 +50,7 @@ const S = {
   einst: null, kategorien: [], zusatz: [], farben: {},
   bilder: [], gesamt: 0, gewaehlt: new Set(), letzter: null, fokus: null,
   modus: localStorage.getItem("modus") || "raster",
-  person: null, personName: "", aehnlich: null, bildSuche: null,
+  person: null, personName: "", aehnlich: null, bildSuche: null, bereich: null,
   laedt: false,
 };
 
@@ -61,7 +61,7 @@ function farbe(kat) { return S.farben[kat] || "#475069"; }
 function zeige(ansicht) {
   $$("nav button").forEach((b) => b.classList.toggle("aktiv", b.dataset.ansicht === ansicht));
   $$(".ansicht").forEach((a) => a.classList.toggle("aktiv", a.id === "ansicht-" + ansicht));
-  const laden = { themen: ladeThemen, personen: ladePersonen, sortieren: ladeSortieren, dubletten: ladeDubletten, einstellungen: ladeEinstellungen }[ansicht];
+  const laden = { themen: ladeThemen, personen: ladePersonen, sortieren: ladeSortieren, dubletten: ladeDubletten, einstellungen: ladeEinstellungen, karte: window.ladeKarte }[ansicht];
   if (laden) Promise.resolve().then(laden).catch((e) => toast(e.message, true));
 }
 $$("nav button").forEach((b) => b.addEventListener("click", () => zeige(b.dataset.ansicht)));
@@ -163,13 +163,21 @@ async function ladeFilter() {
     `<option value="${esc(t.name)}">${esc(t.name)} (${t.anzahl.toLocaleString("de")})</option>`).join("");
   th.value = altThema;
   fill($("#f-kamera"), f.kameras.filter(Boolean), "Alle Kameras");
+  const o = $("#f-ort"), altOrt = o.value;
+  const n = (x) => x.anzahl.toLocaleString("de");
+  o.innerHTML = `<option value="">Alle Orte</option>`
+    + ((f.laender || []).length ? `<optgroup label="Länder">${f.laender.map((l) => `<option value="land:${esc(l.name)}">${esc(l.name)} (${n(l)})</option>`).join("")}</optgroup>` : "")
+    + ((f.orte || []).length ? `<optgroup label="Orte">${f.orte.map((x) => `<option value="ort:${esc(x.name)}">${esc(x.name)} (${n(x)})</option>`).join("")}</optgroup>` : "");
+  o.value = altOrt;
+  o.hidden = !(f.laender || []).length;
 }
 
 function suchParameter(offset) {
   const p = new URLSearchParams({
     q: $("#q").value, art: $("#art").value, kategorie: $("#f-kategorie").value, thema: $("#f-thema").value, jahr: $("#f-jahr").value,
-    kamera: $("#f-kamera").value, sortierung: $("#f-sort").value, offset, limit: 240,
+    kamera: $("#f-kamera").value, ort: $("#f-ort").value, sortierung: $("#f-sort").value, offset, limit: 240,
   });
+  if (S.bereich) p.set("bereich", S.bereich);
   if (S.person) p.set("person", S.person);
   if (S.aehnlich) p.set("aehnlich_zu", S.aehnlich);
   return p;
@@ -402,14 +410,18 @@ async function zeigeDetail(id) {
         <dl class="meta">
           <dt>Aufgenommen</dt><dd>${esc(datumText(b.datum))} <span class="hinweis">(${esc(b.datum_quelle || "")})</span></dd>
           <dt>Kamera</dt><dd>${esc([b.hersteller, b.modell].filter(Boolean).join(" ") || "unbekannt")}</dd>
-          ${b.gps_lat != null ? `<dt>Ort</dt><dd>${b.gps_lat.toFixed(5)}, ${b.gps_lon.toFixed(5)}</dd>` : ""}
+          ${b.gps_lat != null ? `<dt>Ort</dt><dd>${b.ort_stadt ? `<span class="ort-link" id="d-ort" title="Alle Fotos aus ${esc(b.ort_stadt)}">${esc(b.ort || b.ort_stadt)}</span><br>` : (b.ort ? esc(b.ort) + "<br>" : "")}<span class="hinweis">${b.gps_lat.toFixed(5)}, ${b.gps_lon.toFixed(5)}</span> · <span class="ort-link" id="d-karte">auf der Karte</span></dd>` : ""}
           <dt>Größe</dt><dd>${b.breite || "?"} × ${b.hoehe || "?"} · ${groesseText(b.groesse)}</dd>
           <dt>Personen</dt><dd>${(b.gesichter || []).length ? b.gesichter.map((g) => esc(g.name || "unbenannt")).join(", ") : "keine erkannt"}</dd>
           <dt>Einordnung</dt><dd>${esc(b.gruende || "–")}</dd>
           <dt>Pfad</dt><dd>${esc(b.pfad)}</dd>
         </dl>
+        ${b.gps_lat != null && S.einst.karte && S.einst.karte.detail ? `<div class="mini-karte" id="mini-karte"></div>` : ""}
         ${b.ocr_text ? `<div><div class="hinweis">Erkannter Text</div><div class="ocr">${esc(b.ocr_text)}</div></div>` : ""}
       </div>`;
+    if (window.miniKarteZeigen) window.miniKarteZeigen($("#mini-karte"), b.gps_lat, b.gps_lon, id);
+    if ($("#d-karte")) $("#d-karte").onclick = () => window.karteZeigen(b.gps_lat, b.gps_lon, id);
+    if ($("#d-ort")) $("#d-ort").onclick = () => ortFilter("ort:" + b.ort_stadt);
     $("#detail-img").onclick = () => { $("#vollbild-img").src = `/api/ansicht/${id}?kante=3000`; $("#vollbild").hidden = false; };
     $("#d-aehnlich").onclick = () => aehnlicheZeigen(id, b.name);
     $("#d-explorer").onclick = () => api(`/api/bilder/${id}/explorer`, { method: "POST" }).catch((e) => toast(e.message, true));
@@ -428,6 +440,34 @@ function aehnlicheZeigen(id, name) {
   zeige("suche");
   suchen();
 }
+
+async function ortFilter(wert) {
+  await ladeFilter().catch(() => {});
+  $("#f-ort").value = wert;
+  if ($("#f-ort").value !== wert) return;
+  bereichEntfernen();
+  $("#q").value = "";
+  suchen();
+}
+
+function bereichEntfernen() { S.bereich = null; $("#f-bereich-chip").hidden = true; }
+
+// Von der Karte: Fotos in einem Rechteck (süd,west,nord,ost) zeigen, mit den Filtern der Karte
+window.bereichFilter = (bereich, text, filter = {}) => {
+  S.bereich = bereich;
+  const c = $("#f-bereich-chip");
+  c.hidden = false;
+  c.innerHTML = `⌖ ${esc(text)} <button title="Filter entfernen">✕</button>`;
+  $("button", c).onclick = () => { bereichEntfernen(); suchen(); };
+  $("#q").value = "";
+  $("#f-thema").value = $("#f-kamera").value = $("#f-ort").value = "";
+  $("#f-kategorie").value = filter.kategorie || "";
+  $("#f-jahr").value = filter.jahr || "";
+  S.person = S.aehnlich = null;
+  $("#f-person-chip").hidden = $("#f-aehnlich-chip").hidden = true;
+  zeige("suche");
+  suchen();
+};
 
 function personFilter(id, name) {
   S.person = id;
@@ -450,7 +490,7 @@ $$("#ansicht-umschalter button").forEach((b) => b.onclick = () => { setzeModus(b
 let tipp;
 $("#q").addEventListener("input", () => { clearTimeout(tipp); tipp = setTimeout(() => suchen(), 350); });
 $("#q").addEventListener("keydown", (e) => { if (e.key === "Enter") { clearTimeout(tipp); suchen(); } });
-["#art", "#f-kategorie", "#f-thema", "#f-jahr", "#f-kamera", "#f-sort"].forEach((s) => $(s).addEventListener("change", () => suchen()));
+["#art", "#f-kategorie", "#f-thema", "#f-jahr", "#f-kamera", "#f-ort", "#f-sort"].forEach((s) => $(s).addEventListener("change", () => suchen()));
 $("#groesse").addEventListener("input", (e) => document.documentElement.style.setProperty("--kachel", e.target.value + "px"));
 
 $("#bild-suche").addEventListener("change", async (e) => {
@@ -893,7 +933,21 @@ function ladeEinstellungen() {
   $("#e-beschl").value = e.beschleunigung || "auto";
   $("#e-schwelle").value = e.schwelle;
   $("#e-schwelle-wert").textContent = e.schwelle;
+  $("#e-karte-detail").checked = !!(e.karte && e.karte.detail);
+  $("#e-karte-online").checked = !!(e.karte && e.karte.online);
+  kartenSpeicher();
 }
+async function kartenSpeicher() {
+  try {
+    const i = await api("/api/karte/info");
+    $("#e-karte-speicher").textContent = i.kacheln ? ` Gespeichert: ${i.kacheln.toLocaleString("de")} Kartenbilder, ${groesseText(i.bytes)}.` : "";
+    $("#e-karte-leeren").hidden = !i.kacheln;
+  } catch { /* egal */ }
+}
+$("#e-karte-leeren").onclick = async () => {
+  try { await api("/api/karte/leeren", { method: "POST" }); toast("Gespeicherte Kartenbilder gelöscht"); kartenSpeicher(); }
+  catch (e) { toast(e.message, true); }
+};
 $("#e-schwelle").oninput = (ev) => { $("#e-schwelle-wert").textContent = ev.target.value; };
 function zeichneQuellen() {
   $("#e-quellen").innerHTML = quellen.length ? quellen.map((q, i) => `<div class="quelle ${(S.quellenFehlen || []).includes(q) ? "fehlt" : ""}"><span>${esc(q)}</span>${(S.quellenFehlen || []).includes(q) ? `<small>nicht gefunden</small>` : ""}<button data-i="${i}" title="Entfernen">✕</button></div>`).join("")
@@ -958,6 +1012,7 @@ $("#e-speichern").onclick = async () => {
     ocr: { modus: $("#e-ocr").value },
     beschleunigung: $("#e-beschl").value,
     schwelle: +$("#e-schwelle").value,
+    karte: { detail: $("#e-karte-detail").checked, online: $("#e-karte-online").checked },
   };
   try {
     S.einst = await api("/api/einstellungen", { json: neu });

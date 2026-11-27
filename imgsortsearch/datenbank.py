@@ -99,6 +99,11 @@ class Datenbank:
             for spalte in ("zusatz_auto", "zusatz"):  # zusatz: wirksame Liste als ",Natur,Familie,"
                 if spalte not in spalten:
                     v.execute(f"ALTER TABLE bilder ADD COLUMN {spalte} TEXT DEFAULT ''")
+            # Ortsnamen zu den GPS-Daten (ort_fuer: für welche Koordinaten sie berechnet wurden)
+            for spalte in ("ort", "ort_name", "ort_stadt", "ort_land", "ort_such", "ort_fuer"):
+                if spalte not in spalten:
+                    v.execute(f"ALTER TABLE bilder ADD COLUMN {spalte} TEXT")
+            v.execute("CREATE INDEX IF NOT EXISTS ix_bilder_gps ON bilder(gps_lat, gps_lon)")
 
     def _con(self) -> sqlite3.Connection:
         con = getattr(self._lokal, "con", None)
@@ -154,9 +159,10 @@ class Datenbank:
                 personen.setdefault(p["bild_id"], []).append(p["name"])
             updates = []
             for r in self.abfrage("SELECT id, pfad, kamera, tags, ocr_text, schlagwoerter, beschreibung, "
-                                  f"beschreibung_en, zusatz FROM bilder WHERE id IN ({platz})", teil):
+                                  f"beschreibung_en, zusatz, ort_such FROM bilder WHERE id IN ({platz})", teil):
                 teile = [r["pfad"], r["kamera"], r["tags"], r["ocr_text"], r["schlagwoerter"], r["beschreibung"],
-                         r["beschreibung_en"], " ".join(personen.get(r["id"], [])), (r["zusatz"] or "").replace(",", " ")]
+                         r["beschreibung_en"], " ".join(personen.get(r["id"], [])), (r["zusatz"] or "").replace(",", " "),
+                         r["ort_such"]]
                 updates.append((normalisiere(" ".join(t or "" for t in teile)), r["id"]))
             with self.verbindung() as v:
                 v.executemany("UPDATE bilder SET suchtext=? WHERE id=?", updates)

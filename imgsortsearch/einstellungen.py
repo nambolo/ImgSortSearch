@@ -65,6 +65,11 @@ STANDARD = {
         "ziel": "quarantaene",           # quarantaene | papierkorb
         "quarantaene": "",               # leer = Ordner "dubletten-quarantaene" im Datenordner
     },
+    "karte": {
+        "online": False,                 # Kartenkacheln von OpenStreetMap laden (braucht Internet)
+        "detail": True,                  # kleine Karte in der Detailansicht
+        "kachel_url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    },
     "beschleunigung": "auto",            # auto | cuda | directml | xpu | cpu
     "port": 8765,
 }

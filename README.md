@@ -9,6 +9,7 @@ Lokales Programm für Windows, das ein großes Foto-Backup durchsuchbar macht un
 - **Kategorien selbst festlegen** (z. B. Arbeit, Privat, Natur, Tiere): automatisch über Themen („Whiteboard“, „Technische Zeichnung“ → Arbeit), Aufnahmezeit und eigene Regeln, oder per Hand für ganze Suchergebnisse
 - **Sortieren:** kopieren, verschieben oder an Ort und Stelle taggen, **Umbenennen optional**, Tags als XMP-Datei oder in die Datei; jeder Lauf ist **rückgängig** zu machen, Originale werden nie gelöscht
 - **Dubletten:** findet exakt gleiche Dateien und ähnliche Fassungen (verkleinert, neu komprimiert, WhatsApp-Kopien), zeigt sie nebeneinander mit Auflösung, Größe und Aufnahmedaten und schlägt vor, welche Datei bleibt; Aussortiertes kommt in einen Quarantäne-Ordner oder den Papierkorb, rückgängig machbar
+- **Karte:** Fotos mit Standort (GPS) auf einer Karte, nach Ort gruppiert; Klick auf eine Gruppe zeigt alle Fotos von dort, ein Rechteck aufziehen zeigt alle Fotos in diesem Bereich. Beim einzelnen Bild eine kleine Karte. Suche nach Orten („München“, „Italien“), auch ohne Internet
 - **Index fortsetzen:** Start per Knopf, jederzeit anhalten; beim nächsten Mal werden nur neue oder geänderte Bilder analysiert
 
 ## Installation (portabel)
@@ -54,10 +55,27 @@ Prozessor (die sind auch so schnell).
 4. **Personen:** Gruppen benennen, gleiche Personen zusammenführen. Oder ein Foto hineinziehen, um alle Bilder dieser Person zu finden.
 5. **Suche:** prüfen, korrigieren (Bilder markieren → Kategorie anklicken).
 6. **Sortieren:** Modus wählen, Vorschau ansehen, ausführen. Unter „Bisherige Läufe“ lässt sich jeder Lauf zurücknehmen.
-7. **Dubletten:** „Dubletten suchen“. Nutzt den vorhandenen Index, es wird nichts neu analysiert. Pro Gruppe ist das Bild
+7. **Karte:** zeigt alle Fotos mit Standort. Die Zahl an einer Gruppe ist die Anzahl Fotos dort; Klick darauf listet sie
+   rechts auf, „In der Suche zeigen“ übernimmt sie in die Suche (mit allen Funktionen: Kategorie setzen, kopieren ...).
+   „Bereich auswählen“: Rechteck mit der Maus aufziehen. In der Suche gibt es dazu den Filter „Alle Orte“ (Länder und Städte).
+   Ohne weitere Einstellung zeigt die Karte nur Ländergrenzen und braucht kein Internet, siehe unten.
+8. **Dubletten:** „Dubletten suchen“. Nutzt den vorhandenen Index, es wird nichts neu analysiert. Pro Gruppe ist das Bild
    grün markiert, das bleiben soll (höchste Auflösung, Aufnahmedaten der Kamera, größte Datei, Name ohne „Kopie“,
    älteste Datei). Per Klick umstellen, dann die Gruppe oder alle angezeigten Gruppen bereinigen. Serienbilder
    (andere Aufnahmezeit laut Kamera) gelten nicht als Dubletten.
+
+## Karte und Internet
+
+Ortsnamen („Garching bei München, Bayern, Deutschland“) bestimmt das Programm ohne Internet aus einer mitgelieferten
+Ortsliste. Die Kartenansicht zeigt ohne Internet die Ländergrenzen mit den Fotos darauf.
+
+Für Straßen, Orte und Landschaft: **Einstellungen → Karte → „Kartenmaterial aus dem Internet laden“** einschalten
+(standardmäßig aus). Dann holt das Programm Kartenbilder von OpenStreetMap. Dabei sieht der OpenStreetMap-Server die
+IP-Adresse und welche Kartenausschnitte angesehen werden, also ungefähr, wo die Fotos entstanden sind. Fotos und
+Koordinaten werden nicht gesendet. Geladene Kartenbilder bleiben in `daten\kacheln` und gehen danach auch offline;
+löschen lassen sie sich in den Einstellungen. Das Programm hält sich an die
+[Nutzungsregeln der OpenStreetMap-Kartenserver](https://operations.osmfoundation.org/policies/tiles/)
+(eigene Kennung, höchstens zwei Verbindungen gleichzeitig, Zwischenspeicher, kein Vorausladen).
 
 ## Wie lange dauert der Index?
 
@@ -82,10 +100,15 @@ Mit Grafikkarte geht es deutlich schneller. Der Lauf kann jederzeit angehalten u
 | Gesichter | OpenCV YuNet (Erkennung) + SFace (Wiedererkennung) |
 | Texterkennung | Windows-Texterkennung (Deutsch), sonst RapidOCR |
 
+Karte: [Leaflet](https://leafletjs.com) und Leaflet.markercluster (liegen im Programmordner, kein Nachladen aus dem Netz).
+Ortsliste: [GeoNames](https://www.geonames.org) (CC BY 4.0), Ländergrenzen: [Natural Earth](https://www.naturalearthdata.com)
+über world-atlas, Kartenbilder: © OpenStreetMap-Mitwirkende. Die Daten-Dateien erzeugen `werkzeuge/orte_bauen.py` und
+`werkzeuge/welt_bauen.py`.
+
 ## Daten
 
 Alles liegt im Ordner `daten`: `index.sqlite` (Suchindex), `vorschau` (Vorschaubilder), `modelle`,
-`protokolle` (für Rückgängig), `einstellungen.json` und `imgsortsearch.log`.
+`protokolle` (für Rückgängig), `kacheln` (Kartenbilder), `einstellungen.json` und `imgsortsearch.log`.
 
 ## Entwicklung
 
