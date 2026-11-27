@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ImgSortSearch</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="app">
+  <aside class="seite">
+    <div class="logo">
+      <svg viewBox="0 0 32 32" width="30" height="30" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8b5cf6"/><stop offset="1" stop-color="#22d3ee"/></linearGradient></defs><rect x="3" y="5" width="22" height="18" rx="4" fill="none" stroke="url(#lg)" stroke-width="2.4"/><circle cx="11" cy="12" r="2.4" fill="url(#lg)"/><path d="M5 21l6-6 4 4 3-3 5 5" fill="none" stroke="url(#lg)" stroke-width="2.4" stroke-linejoin="round"/><circle cx="23" cy="22" r="5" fill="#0f1115" stroke="url(#lg)" stroke-width="2.4"/><path d="M26.5 25.5L29.5 28.5" stroke="url(#lg)" stroke-width="2.6" stroke-linecap="round"/></svg>
+      <span>ImgSortSearch</span>
+    </div>
+    <nav>
+      <button data-ansicht="suche" class="aktiv"><i>⌕</i>Suche</button>
+      <button data-ansicht="themen"><i>◈</i>Themen &amp; Kategorien</button>
+      <button data-ansicht="personen"><i>☺</i>Personen</button>
+      <button data-ansicht="sortieren"><i>⇄</i>Sortieren</button>
+      <button data-ansicht="einstellungen"><i>⚙</i>Einstellungen</button>
+    </nav>
+    <div class="kategorie-zahlen" id="kat-zahlen"></div>
+    <div class="index-karte" id="index-karte">
+      <div class="index-kopf"><span id="index-phase">Index</span><span id="index-zahl"></span></div>
+      <div class="index-bild" id="index-bild"><span>Kein Lauf aktiv</span></div>
+      <div class="balken"><div id="index-balken"></div></div>
+      <div class="index-meldung" id="index-meldung">Noch kein Index erstellt.</div>
+      <button class="knopf primaer breit" id="index-knopf">Index erstellen</button>
+    </div>
+  </aside>
+
+  <main>
+    <!-- ======================= Suche ======================= -->
+    <section id="ansicht-suche" class="ansicht aktiv">
+      <header class="leiste">
+        <div class="suchfeld">
+          <span class="lupe">⌕</span>
+          <input id="q" type="search" placeholder="Suchen: „Whiteboard“, „Hund am Strand“, Text auf Screenshots, Namen …" autocomplete="off">
+          <select id="art" title="Suchart">
+            <option value="beides">Alles</option>
+            <option value="text">Nur Text</option>
+            <option value="bedeutung">Nach Bedeutung</option>
+          </select>
+        </div>
+        <label class="knopf leicht datei-knopf" title="Ähnliche Bilder zu einem Foto finden">
+          Mit Bild suchen<input type="file" id="bild-suche" accept="image/*" hidden>
+        </label>
+        <div class="umschalter" id="ansicht-umschalter">
+          <button data-modus="raster" class="aktiv" title="Vorschaubilder">▦</button>
+          <button data-modus="liste" title="Liste mit großer Ansicht">☰</button>
+        </div>
+      </header>
+      <div class="filter">
+        <select id="f-kategorie"><option value="">Alle Kategorien</option></select>
+        <select id="f-jahr"><option value="">Alle Jahre</option></select>
+        <select id="f-kamera"><option value="">Alle Kameras</option></select>
+        <select id="f-sort">
+          <option value="datum_ab">Neueste zuerst</option>
+          <option value="datum_auf">Älteste zuerst</option>
+          <option value="unsicher">Unsicherste zuerst</option>
+          <option value="name">Nach Name</option>
+        </select>
+        <span class="chip" id="f-person-chip" hidden></span>
+        <span class="chip" id="f-aehnlich-chip" hidden></span>
+        <span class="spacer"></span>
+        <input type="range" id="groesse" min="110" max="320" value="180" title="Vorschaugröße">
+        <span class="treffer" id="treffer"></span>
+      </div>
+
+      <div class="ergebnis raster" id="ergebnis">
+        <div class="raster-flaeche" id="raster"></div>
+        <div class="liste-flaeche">
+          <div class="liste" id="liste"></div>
+          <div class="detail" id="detail"><div class="leer">Bild in der Liste auswählen</div></div>
+        </div>
+      </div>
+
+      <div class="auswahl-leiste" id="auswahl-leiste" hidden>
+        <span id="auswahl-zahl"></span>
+        <div class="kat-knoepfe" id="auswahl-kategorien"></div>
+        <button class="knopf leicht" id="auswahl-auto" title="Wieder automatisch einordnen">Automatisch</button>
+        <button class="knopf" id="auswahl-kopieren" title="In die Zwischenablage (Strg+C), im Explorer mit Strg+V einfügen">Kopieren</button>
+        <button class="knopf leicht" id="auswahl-weg">✕</button>
+      </div>
+    </section>
+
+    <!-- ======================= Themen ======================= -->
+    <section id="ansicht-themen" class="ansicht">
+      <header class="titel">
+        <div><h1>Themen &amp; Kategorien</h1>
+          <p>Lege fest, welche Bildinhalte zu welcher Kategorie gehören. Änderungen wirken sofort, ohne neue Analyse.</p></div>
+        <button class="knopf primaer" id="themen-speichern">Speichern &amp; neu einordnen</button>
+      </header>
+      <div class="karte">
+        <h2>Kategorien</h2>
+        <p class="hinweis">Jedes Bild landet in genau einer Kategorie (oder „Unklar“). Daraus werden beim Sortieren die Ordner.</p>
+        <div class="kat-liste" id="kat-liste"></div>
+        <div class="zeile"><input id="neue-kat" placeholder="Neue Kategorie, z. B. Natur"><button class="knopf" id="kat-neu">Hinzufügen</button></div>
+      </div>
+      <div class="karte">
+        <div class="zeile zwischen"><h2>Themen</h2>
+          <div class="zeile"><input id="neues-thema" placeholder="Neues Thema, z. B. Schaltschrank"><input id="neues-thema-prompt" placeholder="Beschreibung (optional)"><button class="knopf" id="thema-neu">Hinzufügen</button></div></div>
+        <p class="hinweis">Die Zahl zeigt, für wie viele Bilder das Thema am besten passt. Die Beschreibung hilft dem Bildmodell, sie darf auch englisch sein.</p>
+        <div class="themen-gitter" id="themen-gitter"></div>
+      </div>
+    </section>
+
+    <!-- ======================= Personen ======================= -->
+    <section id="ansicht-personen" class="ansicht">
+      <header class="titel">
+        <div><h1>Personen</h1><p>Gesichter werden automatisch gruppiert. Gib Gruppen einen Namen, dann findest du sie auch über die Suche.</p></div>
+        <div class="zeile">
+          <button class="knopf leicht" id="personen-gruppieren">Neu gruppieren</button>
+          <button class="knopf" id="personen-zusammen" disabled>Auswahl zusammenführen</button>
+        </div>
+      </header>
+      <div class="karte ablage" id="ablage">
+        <div><strong>Person per Foto suchen</strong><br><span class="hinweis">Foto hierher ziehen oder auswählen. Gefunden werden alle Bilder mit dieser Person.</span></div>
+        <label class="knopf primaer">Foto wählen<input type="file" id="person-foto" accept="image/*" hidden></label>
+      </div>
+      <div class="personen-gitter" id="personen-gitter"></div>
+    </section>
+
+    <!-- ======================= Sortieren ======================= -->
+    <section id="ansicht-sortieren" class="ansicht">
+      <header class="titel"><div><h1>Sortieren</h1><p>Erst Vorschau ansehen, dann ausführen. Jeder Lauf kann rückgängig gemacht werden. Originale werden nie gelöscht.</p></div></header>
+      <div class="spalten">
+        <div class="karte">
+          <h2>Was soll passieren?</h2>
+          <div class="optionen" id="s-modus">
+            <label><input type="radio" name="modus" value="kopieren" checked><span><b>Kopieren</b><small>In einen neuen Ordner, Originale bleiben, wo sie sind</small></span></label>
+            <label><input type="radio" name="modus" value="verschieben"><span><b>Verschieben</b><small>In einen neuen Ordner verschieben</small></span></label>
+            <label><input type="radio" name="modus" value="nur_taggen"><span><b>An Ort und Stelle</b><small>Dateien bleiben, nur Tags und auf Wunsch Namen</small></span></label>
+          </div>
+          <div class="feld" id="s-ziel-feld"><label>Zielordner</label>
+            <div class="zeile"><input id="s-ziel" placeholder="z. B. E:\Bilder sortiert"><button class="knopf leicht" id="s-ziel-waehlen">Wählen …</button></div></div>
+          <div class="feld" id="s-ordner-feld"><label>Ordnerschema</label><input id="s-ordner">
+            <small>Platzhalter: {kategorie}, {datum:%Y}, {datum:%Y-%m}, {kamera}</small></div>
+          <label class="schalter"><input type="checkbox" id="s-umbenennen"><span></span>Dateien umbenennen</label>
+          <div class="feld" id="s-name-feld" hidden><label>Namensschema</label><input id="s-name">
+            <small>z. B. {datum:%Y-%m-%d_%H%M%S}_{kategorie}_{kamera} · {original} = alter Name</small></div>
+          <div class="feld"><label>Tags schreiben</label>
+            <select id="s-tags">
+              <option value="sidecar">Als XMP-Datei neben dem Bild (empfohlen)</option>
+              <option value="einbetten">In die Bilddatei (braucht exiftool)</option>
+              <option value="keine">Keine Tags</option>
+            </select></div>
+          <div class="feld"><label>Nur diese Kategorien</label><div class="kat-auswahl" id="s-nur"></div></div>
+          <div class="zeile">
+            <button class="knopf" id="s-vorschau">Vorschau</button>
+            <button class="knopf primaer" id="s-ausfuehren">Ausführen</button>
+          </div>
+          <div class="balken" id="s-balken-box" hidden><div id="s-balken"></div></div>
+        </div>
+        <div class="karte">
+          <h2>Vorschau</h2>
+          <div id="s-ergebnis" class="hinweis">Noch keine Vorschau.</div>
+          <h2 class="abstand">Bisherige Läufe</h2>
+          <div id="protokolle"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================= Einstellungen ======================= -->
+    <section id="ansicht-einstellungen" class="ansicht">
+      <header class="titel"><div><h1>Einstellungen</h1><p>Alles läuft auf diesem Rechner. Es werden keine Bilder ins Internet gesendet.</p></div>
+        <button class="knopf primaer" id="e-speichern">Speichern</button></header>
+      <div class="spalten">
+        <div class="karte">
+          <h2>Bilder-Ordner</h2>
+          <div id="e-quellen" class="quellen"></div>
+          <div class="zeile"><input id="e-quelle-neu" placeholder="Pfad eingeben oder wählen"><button class="knopf leicht" id="e-quelle-waehlen">Wählen …</button><button class="knopf" id="e-quelle-add">Hinzufügen</button></div>
+          <h2 class="abstand">Uhrzeit</h2>
+          <label class="schalter"><input type="checkbox" id="e-az-aktiv"><span></span>Aufnahmezeit berücksichtigen</label>
+          <div class="feld"><label>Arbeitstage</label><div class="tage" id="e-tage"></div></div>
+          <div class="zeile"><div class="feld"><label>von</label><input type="time" id="e-von"></div><div class="feld"><label>bis</label><input type="time" id="e-bis"></div></div>
+          <div class="zeile"><div class="feld"><label>In der Arbeitszeit spricht für</label><select id="e-az-kat"></select></div>
+            <div class="feld"><label>Sonst spricht für</label><select id="e-fz-kat"></select></div></div>
+        </div>
+        <div class="karte">
+          <h2>Analyse</h2>
+          <label class="schalter"><input type="checkbox" id="e-beschreibung"><span></span>Bildbeschreibungen erzeugen (gründlich, aber langsam)</label>
+          <label class="schalter"><input type="checkbox" id="e-gesichter"><span></span>Gesichter erkennen (für die Personensuche)</label>
+          <div class="feld"><label>Texterkennung (OCR)</label>
+            <select id="e-ocr"><option value="text_bilder">Nur Bilder mit Text (Screenshots, Dokumente …)</option>
+              <option value="alle">Alle Bilder (langsam)</option><option value="aus">Aus</option></select></div>
+          <div class="feld"><label>Wie sicher muss die Einordnung sein? <span id="e-schwelle-wert"></span></label>
+            <input type="range" id="e-schwelle" min="0.5" max="4" step="0.25"><small>Höher = mehr Bilder landen in „Unklar“ und werden nicht falsch einsortiert.</small></div>
+          <h2 class="abstand">Status</h2>
+          <div id="e-status" class="hinweis"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="vollbild" id="vollbild" hidden><img id="vollbild-img" alt=""><button class="zu" id="vollbild-zu">✕</button></div>
+<div class="dialog-huelle" id="dialog" hidden><div class="dialog"><h3 id="dialog-titel"></h3><div id="dialog-text"></div>
+  <div class="zeile rechts"><button class="knopf leicht" id="dialog-nein">Abbrechen</button><button class="knopf primaer" id="dialog-ja">OK</button></div></div></div>
+<div class="toast" id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,1 +1,71 @@
 # ImgSortSearch
+
+Lokales Programm für Windows, das ein großes Foto-Backup durchsuchbar macht und sortiert.
+**Alles läuft auf dem eigenen Rechner.** Es werden keine Bilder ins Internet geschickt.
+
+- **Suchindex:** Metadaten (Datum, Kamera, GPS), Bildinhalt, Bildbeschreibung, erkannter Text (OCR) und Personen
+- **Suche:** nach Text („Rechnung 4711“), nach Bedeutung („Hund am Strand“, „Whiteboard“), nach ähnlichen Bildern, nach einem Foto einer Person
+- **Ergebnisse:** als Raster mit Vorschaubildern oder als Liste mit großer Ansicht; markierte Bilder mit **Strg+C** kopieren und im Explorer mit **Strg+V** einfügen
+- **Kategorien selbst festlegen** (z. B. Arbeit, Privat, Natur, Tiere): automatisch über Themen („Whiteboard“, „Technische Zeichnung“ → Arbeit), Aufnahmezeit und eigene Regeln, oder per Hand für ganze Suchergebnisse
+- **Sortieren:** kopieren, verschieben oder an Ort und Stelle taggen, **Umbenennen optional**, Tags als XMP-Datei oder in die Datei; jeder Lauf ist **rückgängig** zu machen, Originale werden nie gelöscht
+- **Index fortsetzen:** Start per Knopf, jederzeit anhalten; beim nächsten Mal werden nur neue oder geänderte Bilder analysiert
+
+## Installation (portabel)
+
+1. Diesen Ordner an einen Ort mit genug Platz legen (ca. 6–8 GB inklusive Modelle), z. B. `D:\ImgSortSearch`.
+2. **`install.bat`** doppelklicken.
+   Das Skript installiert Python, alle Pakete, exiftool und die KI-Modelle **ausschließlich in diesen Ordner**
+   (Unterordner `umgebung` und `daten`). Es wird nichts systemweit installiert und nichts in die Registry geschrieben.
+   Mit NVIDIA-Grafikkarte wird automatisch die beschleunigte Version installiert (`install.bat -NurCpu` verhindert das).
+3. **`start.bat`** doppelklicken. Das Programm öffnet sich in einem eigenen Fenster.
+
+Deinstallieren: den Ordner löschen.
+
+## Erste Schritte
+
+1. **Einstellungen:** Ordner des Bilder-Backups hinzufügen, Arbeitszeiten prüfen.
+2. Links unten **„Index erstellen“**. Rechts unten in der Karte sieht man das Bild, das gerade analysiert wird.
+   Suchen geht schon, während der Index läuft.
+3. **Themen & Kategorien:** Für jedes Thema sieht man Beispielbilder und wie viele Bilder es betrifft. Festlegen, welches
+   Thema zu welcher Kategorie zählt, eigene Themen und Kategorien anlegen, speichern. Die Einordnung wird sofort neu
+   berechnet, ohne die Bilder neu zu analysieren.
+4. **Personen:** Gruppen benennen, gleiche Personen zusammenführen. Oder ein Foto hineinziehen, um alle Bilder dieser Person zu finden.
+5. **Suche:** prüfen, korrigieren (Bilder markieren → Kategorie anklicken).
+6. **Sortieren:** Modus wählen, Vorschau ansehen, ausführen. Unter „Bisherige Läufe“ lässt sich jeder Lauf zurücknehmen.
+
+## Wie lange dauert der Index?
+
+Grobe Werte für 10.000 Bilder auf einem normalen PC ohne Grafikkarte:
+
+| Schritt | Dauer |
+|---|---|
+| Metadaten und Vorschaubilder | wenige Minuten |
+| Bildinhalt (für Suche und Einordnung) | ca. 30–60 min |
+| Gesichter | ca. 30 min |
+| Texterkennung (nur Bilder mit Text) | je nach Anteil |
+| Bildbeschreibungen | mehrere Stunden (in den Einstellungen abschaltbar) |
+
+Mit NVIDIA-Grafikkarte geht es deutlich schneller. Der Lauf kann jederzeit angehalten und später fortgesetzt werden.
+
+## Verwendete Modelle
+
+| Aufgabe | Modell |
+|---|---|
+| Bildinhalt, Bedeutungssuche (versteht Deutsch) | CLIP `xlm-roberta-base-ViT-B-32` (LAION, open_clip) |
+| Bildbeschreibung | BLIP `Salesforce/blip-image-captioning-base`, übersetzt mit `Helsinki-NLP/opus-mt-en-de` |
+| Gesichter | OpenCV YuNet (Erkennung) + SFace (Wiedererkennung) |
+| Texterkennung | Windows-Texterkennung (Deutsch), sonst RapidOCR |
+
+## Daten
+
+Alles liegt im Ordner `daten`: `index.sqlite` (Suchindex), `vorschau` (Vorschaubilder), `modelle`,
+`protokolle` (für Rückgängig), `einstellungen.json` und `imgsortsearch.log`.
+
+## Entwicklung
+
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements-dev.txt
+python -m pytest            # Tests nutzen Ersatzmodelle, kein Download nötig
+python -m imgsortsearch --browser
+```

@@ -1,0 +1,17 @@
+# Wird von install.ps1 in die lokale Umgebung (Ordner "umgebung") installiert.
+# torch/torchvision installiert das Skript vorher passend (CPU oder NVIDIA-Grafikkarte).
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9
+pillow>=10.3
+pillow-heif>=0.16
+numpy>=1.26
+opencv-python-headless>=4.9
+open_clip_torch>=2.24
+transformers>=4.44
+sentencepiece>=0.2
+sacremoses>=0.1
+onnxruntime>=1.17
+rapidocr-onnxruntime>=1.3
+pywebview>=5.1
+winocr>=0.0.13; sys_platform == "win32"
