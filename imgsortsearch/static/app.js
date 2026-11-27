@@ -117,7 +117,7 @@ async function status() {
       zeigeSortierErgebnis(s.sortieren.ergebnis, true);
       ladeProtokolle();
     }
-    if (S.indexLief && !i.laeuft) { if (!S.bildSuche) suchen(false, true); ladeFilter(); }
+    if (S.indexLief && !i.laeuft) { ladeFilter().catch(() => {}).then(() => { if (!S.bildSuche) suchen(false, true); }); }
     S.indexLief = i.laeuft;
     $("#e-status").innerHTML = statusText(s);
     zeigeAusfuehrlich(s.ausfuehrlich);
@@ -163,14 +163,18 @@ async function ladeFilter() {
   const fill = (sel, werte, leer) => {
     const alt = sel.value;
     sel.innerHTML = `<option value="">${leer}</option>` + werte.map((w) => `<option>${esc(w)}</option>`).join("");
-    sel.value = alt;
+    behalte(sel, alt);
   };
+  // gibt es den gewählten Wert nicht mehr (Thema oder Kategorie gelöscht), auf "Alle" zurück statt leerer Auswahl
+  const behalte = (sel, alt) => { sel.value = alt; if (sel.selectedIndex < 0) sel.value = ""; return sel.value !== alt; };
+  const altKat = $("#f-kategorie").value, altJahr = $("#f-jahr").value;
   fill($("#f-kategorie"), f.kategorien, "Alle Kategorien");
   fill($("#f-jahr"), f.jahre, "Alle Jahre");
   const th = $("#f-thema"), altThema = th.value;
   th.innerHTML = `<option value="">Alle Themen</option>` + (f.themen || []).map((t) =>
     `<option value="${esc(t.name)}">${esc(t.name)} (${t.anzahl.toLocaleString("de")})</option>`).join("");
-  th.value = altThema;
+  let geaendert = behalte(th, altThema);
+  const altKamera = $("#f-kamera").value;
   fill($("#f-kamera"), f.kameras.filter(Boolean), "Alle Kameras");
   const o = $("#f-ort"), altOrt = o.value;
   const n = (x) => x.anzahl.toLocaleString("de");
@@ -179,8 +183,10 @@ async function ladeFilter() {
   o.innerHTML = `<option value="">Alle Orte</option>`
     + ((f.laender || []).length ? `<optgroup label="Länder">${f.laender.map((l) => `<option value="land:${esc(l.name)}">${esc(l.name)} (${n(l)})</option>`).join("")}</optgroup>` : "")
     + (orte.length ? `<optgroup label="Orte">${orte.map((x) => `<option value="ort:${esc(x.name)}">${esc(x.name)} (${n(x)})</option>`).join("")}</optgroup>` : "");
-  o.value = altOrt;
+  geaendert = behalte(o, altOrt) || geaendert;
   o.hidden = !(f.laender || []).length;
+  geaendert = geaendert || $("#f-kategorie").value !== altKat || $("#f-jahr").value !== altJahr || $("#f-kamera").value !== altKamera;
+  return geaendert;  // true: ein Filter ist weggefallen, die Suche sollte neu laufen
 }
 
 function sortierungAnpassen() {
@@ -207,7 +213,33 @@ function suchParameter(offset) {
 let suchNr = 0;
 function fotoSucheBeenden() {
   S.bildSuche = null;
+  S.fotoAnfrage = null;
   $("#f-foto-chip").hidden = true;
+}
+
+// Filter der Suchleiste, die auch für die Suche per Foto gelten
+function filterParameter() {
+  const p = new URLSearchParams({ kategorie: $("#f-kategorie").value, thema: $("#f-thema").value, jahr: $("#f-jahr").value,
+    kamera: $("#f-kamera").value, ort: $("#f-ort").value });
+  if (S.bereich) p.set("bereich", S.bereich);
+  return p;
+}
+
+// Suche per Foto (ähnliche Bilder oder Person): die Datei bleibt gemerkt, damit Filter die Treffer eingrenzen können
+async function fotoSuche(anfrage) {
+  const fd = new FormData();
+  fd.append("datei", anfrage.datei);
+  const r = await api(`${anfrage.pfad}?${filterParameter()}`, { method: "POST", body: fd });
+  if (anfrage.pfad === "/api/personensuche" && !r.gesichter.length) return r;
+  zeigeTreffer(r.gesamt, r.bilder, anfrage.text);
+  S.fotoAnfrage = anfrage;
+  return r;
+}
+
+// Ein Filter hat sich geändert: eine laufende Suche per Foto bleibt bestehen und wird nur eingegrenzt
+function filterGeaendert() {
+  if (S.bildSuche && S.fotoAnfrage) fotoSuche(S.fotoAnfrage).catch((e) => toast(e.message, true));
+  else suchen();
 }
 
 async function suchen(weiter = false, behalten = false) {
@@ -274,7 +306,9 @@ function zeichneErgebnis() {
     const filter = aktiveFilter();
     const text = filter.length
       ? `Keine Bilder gefunden. Aktive Filter: <b>${filter.map(esc).join(", ")}</b>. <button class="knopf leicht" id="filter-weg">Alle Filter entfernen</button>`
-      : `Keine Bilder gefunden. ${S.gesamt === 0 && !$("#q").value ? "Lege unter Einstellungen einen Bilder-Ordner an und starte den Index." : ""}`;
+      : `Keine Bilder gefunden. ${S.gesamt === 0 && !$("#q").value
+        ? (S.einst && S.einst.quellen.length ? "Starte links unten den Index, damit die Bilder hier erscheinen."
+          : "Lege unter Einstellungen einen Bilder-Ordner an und starte den Index.") : ""}`;
     if (S.modus === "raster") $("#raster").innerHTML = `<div class="mehr hinweis">${text}</div>`;
     else $("#detail").innerHTML = `<div class="leer">${text}</div>`;
     const weg = $("#filter-weg");
@@ -298,7 +332,7 @@ function filterEntfernen() {
   S.person = null; S.aehnlich = null;
   $("#f-person-chip").hidden = true; $("#f-aehnlich-chip").hidden = true;
   if (typeof bereichEntfernen === "function") bereichEntfernen();
-  suchen();
+  filterGeaendert();
 }
 
 function groesseText(n) {
@@ -474,6 +508,8 @@ $("#e-lang-alle").onclick = async () => {
   } catch (e) { toast(e.message, true); }
 };
 
+// Umschalt+Klick markiert sonst zusätzlich den Text dazwischen, und Strg+C kopierte dann Text statt der Dateien
+["#raster", "#liste"].forEach((s) => $(s).addEventListener("mousedown", (e) => { if (e.shiftKey && e.target.closest(".kachel, .eintrag")) e.preventDefault(); }));
 $("#raster").addEventListener("click", (e) => { const k = e.target.closest(".kachel"); if (k) waehle(+k.dataset.id, e); });
 $("#raster").addEventListener("dblclick", (e) => { const k = e.target.closest(".kachel"); if (k) { setzeModus("liste"); S.fokus = +k.dataset.id; zeichneErgebnis(); zeigeDetail(S.fokus); scrolleZuFokus(); } });
 $("#liste").addEventListener("click", (e) => { const k = e.target.closest(".eintrag"); if (k) waehle(+k.dataset.id, e); });
@@ -630,19 +666,16 @@ $$("#ansicht-umschalter button").forEach((b) => b.onclick = () => { setzeModus(b
 let tipp;
 $("#q").addEventListener("input", () => { clearTimeout(tipp); tipp = setTimeout(() => suchen(), 350); });
 $("#q").addEventListener("keydown", (e) => { if (e.key === "Enter") { clearTimeout(tipp); suchen(); } });
-["#art", "#f-kategorie", "#f-thema", "#f-jahr", "#f-kamera", "#f-ort", "#f-sort"].forEach((s) => $(s).addEventListener("change", () => suchen()));
+["#art", "#f-kategorie", "#f-thema", "#f-jahr", "#f-kamera", "#f-ort", "#f-sort"].forEach((s) => $(s).addEventListener("change", () => filterGeaendert()));
 $("#groesse").addEventListener("input", (e) => document.documentElement.style.setProperty("--kachel", e.target.value + "px"));
 
 $("#bild-suche").addEventListener("change", async (e) => {
   const f = e.target.files[0];
   if (!f) return;
-  const fd = new FormData();
-  fd.append("datei", f);
   toast("Suche ähnliche Bilder …");
   try {
-    const r = await api("/api/suche-mit-bild", { method: "POST", body: fd });
-    zeigeTreffer(r.gesamt, r.bilder, `Ähnlich wie ${f.name}`);
-    toast(`${r.gesamt} ähnliche Bilder gefunden`);
+    const r = await fotoSuche({ pfad: "/api/suche-mit-bild", datei: f, text: `Ähnlich wie ${f.name}` });
+    toast(`${r.gesamt} ähnliche Bilder gefunden${aktiveFilter().length ? " (mit den gewählten Filtern)" : ""}`);
   } catch (err) { toast(err.message, true); }
   e.target.value = "";
 });
@@ -768,7 +801,7 @@ $("#themen-speichern").onclick = async () => {
     zeigeThemenStand();
     await ladeGrundlagen();
     toast("Gespeichert. Bilder werden neu eingeordnet …");
-    setTimeout(() => { ladeThemen(); ladeFilter().catch(() => {}); suchen(); }, 1500);
+    setTimeout(async () => { ladeThemen(); await ladeFilter().catch(() => {}); filterGeaendert(); }, 1500);
   } catch (e) { toast(e.message, true); }
 };
 
@@ -807,6 +840,12 @@ async function ladePersonen() {
       $("#personen-zusammen").disabled = personenWahl.size < 2;
     };
   });
+  // offene Gesichter-Ansicht auf den neuen Stand bringen (Person kann zusammengeführt oder umbenannt sein)
+  if (!$("#person-detail").hidden && PD.id != null) {
+    const p = personenDaten.find((x) => x.id === PD.id);
+    if (p) await personOeffnen(p.id, p.name || "", false);
+    else $("#person-detail").hidden = true;
+  }
 }
 
 /* Vorschläge: Gruppen, die zu einer Person gehören könnten (je Person auf einmal entscheiden) */
@@ -866,7 +905,7 @@ $("#pv-spaeter").onclick = () => {
 
 /* Gesichter einer Person: Fehler finden und korrigieren */
 const PD = { id: null, name: "", gesichter: [], wahl: new Set(), letzter: null };
-async function personOeffnen(id, name) {
+async function personOeffnen(id, name, scrollen = true) {
   const r = await api(`/api/personen/${id}/gesichter`);
   Object.assign(PD, { id, name, gesichter: r.gesichter, letzter: null });
   PD.wahl.clear();
@@ -906,7 +945,7 @@ async function personOeffnen(id, name) {
     `<option value="neu">Neue Person …</option>`;
   pdAuswahlZeigen();
   $("#person-detail").hidden = false;
-  $("#person-detail").scrollIntoView({ behavior: "smooth", block: "start" });
+  if (scrollen) $("#person-detail").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 function pdAuswahlZeigen() {
   $$("#pd-gesichter .gesicht").forEach((el) => el.classList.toggle("gewaehlt", PD.wahl.has(PD.gesichter[+el.dataset.i].id)));
@@ -918,9 +957,7 @@ async function pdAktion(pfad, daten, meldung) {
   try {
     await api(pfad, { json: { gesichter: [...PD.wahl], ...daten } });
     toast(meldung);
-    await ladePersonen();
-    if (personenDaten.some((p) => p.id === PD.id)) await personOeffnen(PD.id, PD.name);
-    else $("#person-detail").hidden = true;
+    await ladePersonen();  // aktualisiert auch die offene Gesichter-Ansicht
   } catch (e) { toast(e.message, true); }
 }
 $("#pd-nicht").onclick = () => pdAktion("/api/gesichter/nicht-diese-person", {}, "Entfernt. Ähnliche Gesichter werden dieser Person nicht mehr zugeordnet.");
@@ -969,23 +1006,32 @@ $("#personen-gruppieren").onclick = async () => {
   } catch (e) { toast(e.message, true); }
 };
 $("#personen-zusammen").onclick = async () => {
-  const ids = [...personenWahl];
+  // Ziel: benannte Person vor unbenannter, dann die größte. Ihr Name bleibt.
+  const wahl = [...personenWahl].map((id) => personenDaten.find((p) => p.id === id)).filter(Boolean)
+    .sort((a, b) => (!a.name - !b.name) || b.bilder - a.bilder);
+  if (wahl.length < 2) return;
+  const [ziel, ...uebrige] = wahl;
+  const namen = uebrige.filter((p) => p.name && p.name !== ziel.name).map((p) => p.name);
+  const ok = await frage("Personen zusammenführen",
+    `${wahl.length} Gruppen werden zu <b>${esc(ziel.name || "einer Gruppe")}</b> zusammengeführt `
+    + `(zusammen ${wahl.reduce((n, p) => n + p.bilder, 0).toLocaleString("de")} Bilder).`
+    + (namen.length ? `<br><br>Achtung: ${namen.length === 1 ? "Der Name" : "Die Namen"} <b>${namen.map(esc).join(", ")}</b> `
+      + `${namen.length === 1 ? "geht" : "gehen"} dabei verloren. Sind das wirklich dieselben Personen?` : ""),
+    "Zusammenführen");
+  if (ok !== true) return;
   try {
-    await api("/api/personen/zusammenfuehren", { json: { ziel: ids[0], quellen: ids.slice(1) } });
-    toast("Zusammengeführt");
+    await api("/api/personen/zusammenfuehren", { json: { ziel: ziel.id, quellen: uebrige.map((p) => p.id) } });
+    toast(`Zusammengeführt${ziel.name ? ` zu ${ziel.name}` : ""}`);
     await ladePersonen();
   } catch (e) { toast(e.message, true); }
 };
 async function personSuchen(datei) {
-  const fd = new FormData();
-  fd.append("datei", datei);
   toast("Suche nach dieser Person …");
   try {
-    const r = await api("/api/personensuche", { method: "POST", body: fd });
+    const r = await fotoSuche({ pfad: "/api/personensuche", datei, text: `Person aus ${datei.name || "Foto"}` });
     if (!r.gesichter.length) { toast("Auf dem Foto wurde kein Gesicht gefunden.", true); return; }
     zeige("suche");
-    zeigeTreffer(r.gesamt, r.bilder, `Person aus ${datei.name || "Foto"}`);
-    toast(`${r.gesamt} Bilder mit dieser Person gefunden${r.gesichter.length > 1 ? " (größtes Gesicht auf dem Foto verwendet)" : ""}`);
+    toast(`${r.gesamt} Bilder mit dieser Person gefunden${r.gesichter.length > 1 ? " (größtes Gesicht auf dem Foto verwendet)" : ""}${aktiveFilter().length ? " (mit den gewählten Filtern)" : ""}`);
   } catch (e) { toast(e.message, true); }
 }
 $("#person-foto").onchange = (e) => { if (e.target.files[0]) personSuchen(e.target.files[0]); e.target.value = ""; };
@@ -1002,7 +1048,12 @@ function sortierEinstellungen() {
     umbenennen: $("#s-umbenennen").checked, name: $("#s-name").value, tags: $("#s-tags").value,
   };
 }
-function sortierNur() { return $$("#s-nur input:checked").map((i) => i.value); }
+function sortierNur() {
+  const nur = $$("#s-nur input:checked").map((i) => i.value);
+  // nichts angehakt: der Server würde sonst alle Bilder nehmen
+  if (!nur.length) throw new Error("Bitte unter „Nur diese Kategorien“ mindestens eine Kategorie anhaken.");
+  return nur;
+}
 
 function sortierFelder() {
   const modus = $("input[name=modus]:checked").value;
@@ -1172,6 +1223,11 @@ function zeichneDubletten() {
     $("#d-gruppen").innerHTML = `<div class="karte hinweis">Keine Dubletten gefunden.</div>`;
     return;
   }
+  if (!gr.length) {
+    $("#d-gruppen").innerHTML = `<div class="karte hinweis">Keine ${$("#d-filter").value === "exakt" ? "exakt gleichen" : "ähnlichen"} Gruppen. `
+      + `Unter „Alle Gruppen“ sind ${D.gruppen.length.toLocaleString("de")} zu sehen.</div>`;
+    return;
+  }
   // bei sehr vielen Gruppen nur die ersten zeichnen; „Alle angezeigten“ gilt trotzdem für alle
   const zeigen = gr.slice(0, 150);
   $("#d-gruppen").innerHTML = zeigen.map((g) => {
@@ -1239,9 +1295,19 @@ async function dubBereinigen(gruppen) {
   if (!ok) return;
   try {
     const r = await api("/api/dubletten/bereinigen", { json: { ziel, quarantaene, gruppen: auftrag } });
-    toast(`${r.erledigt.length.toLocaleString("de")} Dateien aussortiert (${gbText(r.bytes)})`);
+    const m = r.erledigt.length;
+    toast(`${m.toLocaleString("de")} ${m === 1 ? "Datei" : "Dateien"} aussortiert (${gbText(r.bytes)})`);
     if (r.fehler.length) await frage("Nicht alles hat geklappt", r.fehler.slice(0, 15).map(esc).join("<br>"), "OK");
     await ladeDubletten();
+    // aussortierte Bilder sind nicht mehr im Index: Suchergebnis und Zähler sonst veraltet
+    if (S.bildSuche) {
+      const weg = new Set(r.erledigt);
+      S.bilder = S.bilder.filter((b) => !weg.has(b.id));
+      S.gesamt = S.bilder.length;
+      weg.forEach((i) => S.gewaehlt.delete(i));
+      zeichneErgebnis();
+    } else suchen(false, true);
+    status();
   } catch (e) { toast(e.message, true); }
 }
 $("#d-alle").onclick = () => dubBereinigen(dubAngezeigt());

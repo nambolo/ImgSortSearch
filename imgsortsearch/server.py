@@ -432,15 +432,16 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
         return {int(ids[i]): float(sims[i]) for i in ordnung if sims[i] >= schwelle}
 
     @app.post("/api/suche-mit-bild")
-    async def suche_mit_bild(datei: UploadFile = File(...)):
+    async def suche_mit_bild(datei: UploadFile = File(...), kategorie: str = "", jahr: str = "", kamera: str = "",
+                             thema: str = "", ort: str = "", bereich: str = ""):
         img = _upload_bild(await datei.read())
         clip = z.m.clip()
         if clip is None:
             raise HTTPException(503, "Bildmodell nicht verfügbar")
-        rang = _vektor_rang(clip.bilder([img])[0], schwelle=0.0, max_n=300)
-        zeilen = z.db.abfrage(f"SELECT *, {KAT} AS kategorie FROM bilder WHERE id IN ({','.join('?' * len(rang))})",
-                              list(rang)) if rang else []
-        zeilen = sorted(zeilen, key=lambda r: -rang[r["id"]])
+        wo, par = bedingungen(kategorie, jahr, kamera, 0, thema, False, ort, bereich)
+        # mit Filtern weiter suchen, sonst blieben von den 300 ähnlichsten kaum welche übrig
+        rang = _vektor_rang(clip.bilder([img])[0], schwelle=0.0, max_n=300 if wo == "1=1" else 3000)
+        zeilen = _zeilen_mit_filter(rang, wo, par)[:300]
         return {"gesamt": len(zeilen), "bilder": [kurz(r) for r in zeilen]}
 
     @app.get("/api/bild/{bild_id}")
@@ -721,7 +722,8 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
         return {"ok": True}
 
     @app.post("/api/personensuche")
-    async def personensuche(datei: UploadFile = File(...), gesicht: int = 0):
+    async def personensuche(datei: UploadFile = File(...), gesicht: int = 0, kategorie: str = "", jahr: str = "",
+                            kamera: str = "", thema: str = "", ort: str = "", bereich: str = ""):
         img = _upload_bild(await datei.read())
         modell = z.m.gesichter()
         if modell is None:
@@ -732,12 +734,20 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
         gef.sort(key=lambda g: -g["w"] * g["h"])
         wahl = gef[min(gesicht, len(gef) - 1)]
         rang = dict(personen.aehnliche_gesichter(z.db, wahl["vektor"], personen.schwellen(z.e.werte)["suche"]))
-        zeilen = z.db.abfrage(f"SELECT *, {KAT} AS kategorie FROM bilder WHERE id IN ({','.join('?' * len(rang))})",
-                              list(rang)) if rang else []
-        zeilen = sorted(zeilen, key=lambda r: -rang[r["id"]])
+        wo, par = bedingungen(kategorie, jahr, kamera, 0, thema, False, ort, bereich)
+        zeilen = _zeilen_mit_filter(rang, wo, par)
         w, h = img.size
         return {"gesichter": [{"x": g["x"] / w, "y": g["y"] / h, "w": g["w"] / w, "h": g["h"] / h} for g in gef],
                 "gewaehlt": min(gesicht, len(gef) - 1), "gesamt": len(zeilen), "bilder": [kurz(r) for r in zeilen]}
+
+    def _zeilen_mit_filter(rang: dict, wo: str, par: list) -> list:
+        """Bilder aus rang (id -> Ähnlichkeit), die die Filter erfüllen, die ähnlichsten zuerst."""
+        ids, zeilen = list(rang), []
+        for i in range(0, len(ids), 900):
+            teil = ids[i:i + 900]
+            zeilen += z.db.abfrage(f"SELECT *, {KAT} AS kategorie FROM bilder WHERE {wo} AND id IN "
+                                   f"({','.join('?' * len(teil))})", (*par, *teil))
+        return sorted(zeilen, key=lambda r: -rang[r["id"]])
 
     def _upload_bild(daten: bytes) -> Image.Image:
         from PIL import ImageOps
