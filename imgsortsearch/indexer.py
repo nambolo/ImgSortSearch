@@ -36,7 +36,7 @@ class Zeitmessung:
     So sieht man, ob die Grafikkarte auf den Prozessor wartet ("warten_auf_bilder" groß)
     oder Gesichter/Texterkennung bremsen ("warten_auf_gesichter_ocr" groß)."""
 
-    def __init__(self, alle_sekunden: float = 60.0):
+    def __init__(self, alle_sekunden: float = 30.0):
         self._lock = threading.Lock()
         self.summe: dict[str, float] = {}
         self.anzahl: dict[str, int] = {}
@@ -316,7 +316,7 @@ class Indexer:
         self.status.update(kw)
 
     def _lauf(self, schritte):
-        self._setze(laeuft=True, fehler=[], start=time.time(), meldung="")
+        self._setze(laeuft=True, fehler=[], start=time.time(), meldung="", zeiten="")
         self.m.fehler_vergessen()  # Modelle, die beim letzten Mal fehlten, erneut versuchen
         try:
             self._bildmodell_pruefen()
@@ -570,6 +570,7 @@ class Indexer:
                 laufend = (geladen, [nach.submit(self._gesichter_stapel, geladen, gesichter, zeiten),
                                      nach.submit(self._text_stapel, geladen, vek_map, ocr, zeiten)])
                 zeiten.stapel_fertig(len(geladen))
+                self._setze(zeiten=zeiten.text())  # auch in der Oberfläche (Einstellungen > Status)
             nach_abwarten()
             laufend = None
             self._setze(fertig=len(offen))

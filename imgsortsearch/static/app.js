@@ -134,6 +134,7 @@ function statusText(s) {
     `Rechnet auf: ${esc(Object.entries(s.geraete || {}).filter(([n]) => n !== "gesichter").map(([, g]) => g)[0] || "wird beim ersten Indexlauf ermittelt")}`,
     ...((s.geraete || {}).gesichter ? [`Gesichter: ${esc(s.geraete.gesichter)}`] : []),
     ...f.map(([n, t]) => `<span style="color:var(--schlecht)">Modell ${esc(n)} nicht verfügbar: ${esc(t)}</span>`),
+    ...(s.index.laeuft && s.index.zeiten ? [`<span style="color:var(--text-2, inherit);font-size:12px">Zeiten: ${esc(s.index.zeiten)}</span>`] : []),
     ...(s.index.fehler || []).slice(-5).map((t) => `<span style="color:var(--warn)">${esc(t)}</span>`),
   ].join("<br>");
 }
