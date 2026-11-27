@@ -14,11 +14,11 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from . import modelle, personen, sortieren, zwischenablage
+from . import dubletten, modelle, papierkorb, personen, sortieren, zwischenablage
 from .datenbank import Datenbank
 from .einstellungen import Einstellungen, daten_ordner
 from .indexer import Indexer, Modelle, alle_neu_einordnen, bilder_entfernen, bilder_im_ordner, lade_themen, \
-    text_suche_bedingung, vorschau_erzeugen, vorschau_pfad
+    quarantaene_ordner, text_suche_bedingung, vorschau_erzeugen, vorschau_pfad
 from .klassifizierung import UNKLAR
 
 log = logging.getLogger(__name__)
@@ -35,6 +35,9 @@ class Zustand:
         self.indexer.nach_lauf.append(self._personen_zuordnen)
         self.fenster = None           # pywebview-Fenster, falls vorhanden
         self.sortier_status = {"laeuft": False, "fertig": 0, "gesamt": 0, "ergebnis": None}
+        self.dubletten_stop = threading.Event()
+        self.dubletten = dubletten.Suche(self.db, vorschau_pfad, self.dubletten_stop)
+        self.dubletten_ergebnis = None
 
     def _personen_zuordnen(self):
         self.indexer.status["meldung"] = "Gesichter werden Personen zugeordnet ..."
@@ -504,6 +507,82 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
             with z.db.verbindung() as v:
                 v.execute("UPDATE protokolle SET rueckgaengig=1 WHERE id=?", (pid,))
         erg.pop("pfad_aenderungen")
+        return erg
+
+    # ------------------------------------------------------------ Dubletten
+
+    @app.get("/api/dubletten")
+    def dubletten_lesen():
+        d = z.e.get("dubletten") or {}
+        return {"status": z.dubletten.status, "ergebnis": z.dubletten_ergebnis,
+                "ziel": d.get("ziel", "quarantaene"), "quarantaene": str(quarantaene_ordner(z.e)),
+                "papierkorb": papierkorb.verfuegbar()}
+
+    @app.post("/api/dubletten/suchen")
+    def dubletten_suchen():
+        if z.dubletten.status["laeuft"]:
+            return {"gestartet": False}
+        z.dubletten_stop.clear()
+        z.dubletten.status.update(laeuft=True, phase="start", fertig=0, gesamt=0, meldung="Wird gestartet ...")
+
+        def lauf():
+            try:
+                erg = z.dubletten.ausfuehren()
+                if not erg["abgebrochen"] or z.dubletten_ergebnis is None:
+                    z.dubletten_ergebnis = erg
+            except Exception as ex:
+                log.exception("Dublettensuche fehlgeschlagen")
+                z.dubletten.status.update(laeuft=False, phase="fehler", meldung=f"Fehler: {ex}")
+
+        threading.Thread(target=lauf, daemon=True).start()
+        return {"gestartet": True}
+
+    @app.post("/api/dubletten/stop")
+    def dubletten_stop():
+        z.dubletten_stop.set()
+        return {"ok": True}
+
+    @app.post("/api/dubletten/bereinigen")
+    def dubletten_bereinigen(daten: dict = Body(...)):
+        """``gruppen``: [{"behalten": [ids], "weg": [ids]}]. Jede Gruppe muss ein Bild behalten."""
+        if z.dubletten.status["laeuft"]:
+            raise HTTPException(409, "Die Dublettensuche läuft noch.")
+        neu = {k: daten[k] for k in ("ziel", "quarantaene") if k in daten}
+        if neu:
+            z.e.aktualisieren({"dubletten": neu})
+        d = z.e["dubletten"]
+        weg, behalten = [], set()
+        for g in daten.get("gruppen", []):
+            b = {int(i) for i in g.get("behalten", [])}
+            if not b:
+                raise HTTPException(400, "In jeder Gruppe muss mindestens ein Bild behalten werden.")
+            behalten |= b
+            weg += [int(i) for i in g.get("weg", [])]
+        quarantaene = quarantaene_ordner(z.e)
+        try:
+            erg = dubletten.bereinigen(z.db, weg, behalten, d.get("ziel", "quarantaene"), quarantaene,
+                                       daten_ordner() / "protokolle")
+        except ValueError as ex:
+            raise HTTPException(400, str(ex))
+        if erg["protokoll"]:
+            ort = "Papierkorb" if d.get("ziel") == "papierkorb" else "Quarantäne"
+            with z.db.verbindung() as v:
+                v.execute("INSERT INTO protokolle (datei, zeit, beschreibung) VALUES (?,?,?)",
+                          (erg["protokoll"], datetime.now().isoformat(timespec="seconds"),
+                           f"Dubletten aussortiert ({ort}), {len(erg['erledigt'])} Dateien"))
+            erg["protokoll_id"] = z.db.eins("SELECT MAX(id) AS i FROM protokolle")["i"]
+        bilder_entfernen(z.db, erg["erledigt"])  # Rückgängig legt sie zurück, der nächste Indexlauf nimmt sie auf
+        # erledigte Gruppen aus der Liste nehmen (nicht verschobene Dateien bleiben in ihrer Gruppe sichtbar)
+        erledigt = set(erg["erledigt"])
+        if z.dubletten_ergebnis:
+            fertig = {int(g["nr"]) for g in daten.get("gruppen", []) if g.get("nr") is not None}
+            rest = []
+            for g in z.dubletten_ergebnis["gruppen"]:
+                bilder = [b for b in g["bilder"] if b["id"] not in erledigt]
+                offen_weg = [b for b in g["bilder"] if b["id"] in set(weg) and b["id"] not in erledigt]
+                if len(bilder) >= 2 and (g["nr"] not in fertig or offen_weg):
+                    rest.append(dict(g, bilder=bilder))
+            z.dubletten_ergebnis["gruppen"] = rest
         return erg
 
     # ------------------------------------------------------------ Oberfläche

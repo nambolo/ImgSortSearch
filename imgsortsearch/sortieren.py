@@ -360,6 +360,14 @@ def rueckgaengig(protokoll: Path, echt: bool = False) -> dict:
                     ordner.add(ziel.parent)
                 else:
                     probleme.append(f"Übersprungen (Ziel fehlt oder Quelle belegt): {ziel}")
+            elif op == "papierkorb":
+                from . import papierkorb
+                if ziel.exists():
+                    probleme.append(f"Übersprungen (Platz schon belegt): {ziel}")
+                else:
+                    schritte.append(f"Aus dem Papierkorb zurück: {ziel}")
+                    if echt and not papierkorb.herausholen(ziel):
+                        probleme.append(f"Nicht mehr im Papierkorb: {ziel}")
             elif op == "sidecar":
                 if ziel.exists():
                     schritte.append(f"XMP löschen: {ziel}")

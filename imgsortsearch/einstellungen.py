@@ -61,6 +61,10 @@ STANDARD = {
         "ordner": "{kategorie}/{datum:%Y}/{datum:%Y-%m}",
         "tags": "sidecar",               # sidecar | einbetten | keine
     },
+    "dubletten": {
+        "ziel": "quarantaene",           # quarantaene | papierkorb
+        "quarantaene": "",               # leer = Ordner "dubletten-quarantaene" im Datenordner
+    },
     "beschleunigung": "auto",            # auto | cuda | directml | xpu | cpu
     "port": 8765,
 }

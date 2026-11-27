@@ -61,7 +61,7 @@ function farbe(kat) { return S.farben[kat] || "#475069"; }
 function zeige(ansicht) {
   $$("nav button").forEach((b) => b.classList.toggle("aktiv", b.dataset.ansicht === ansicht));
   $$(".ansicht").forEach((a) => a.classList.toggle("aktiv", a.id === "ansicht-" + ansicht));
-  const laden = { themen: ladeThemen, personen: ladePersonen, sortieren: ladeSortieren, einstellungen: ladeEinstellungen }[ansicht];
+  const laden = { themen: ladeThemen, personen: ladePersonen, sortieren: ladeSortieren, dubletten: ladeDubletten, einstellungen: ladeEinstellungen }[ansicht];
   if (laden) Promise.resolve().then(laden).catch((e) => toast(e.message, true));
 }
 $$("nav button").forEach((b) => b.addEventListener("click", () => zeige(b.dataset.ansicht)));
@@ -635,6 +635,161 @@ async function ladeProtokolle() {
     } catch (e) { b.disabled = false; toast(e.message, true); }
   });
 }
+
+/* ------------------------------------------------------------ Dubletten */
+
+const D = { gruppen: [], wahl: new Map(), timer: null, geladen: false };
+
+function gbText(n) {
+  return n >= 1073741824 ? `${(n / 1073741824).toLocaleString("de", { maximumFractionDigits: 1 })} GB` : groesseText(n);
+}
+
+async function ladeDubletten() {
+  const d = await api("/api/dubletten");
+  if (!D.geladen) {
+    $(`input[name=d-ziel][value=${d.ziel === "papierkorb" && d.papierkorb ? "papierkorb" : "quarantaene"}]`).checked = true;
+    $("#d-quarantaene").value = d.quarantaene;
+    D.geladen = true;
+  }
+  $("#d-papierkorb-wahl").hidden = !d.papierkorb;
+  dublettenFelder();
+  zeigeDublettenStatus(d);
+}
+
+function dublettenFelder() { $("#d-quarantaene-feld").hidden = $("input[name=d-ziel]:checked").value !== "quarantaene"; }
+$$("input[name=d-ziel]").forEach((r) => r.onchange = dublettenFelder);
+$("#d-quarantaene-waehlen").onclick = () => ordnerWaehlen("#d-quarantaene");
+
+function zeigeDublettenStatus(d) {
+  const st = d.status;
+  clearTimeout(D.timer);
+  $("#d-suchen").textContent = st.laeuft ? "Anhalten" : (d.ergebnis ? "Erneut suchen" : "Dubletten suchen");
+  $("#d-balken-box").hidden = !st.laeuft;
+  $("#d-balken").style.width = st.gesamt ? `${(100 * st.fertig) / st.gesamt}%` : "4%";
+  if (st.laeuft) {
+    $("#d-meldung").textContent = `${st.meldung} ${st.gesamt ? `${st.fertig.toLocaleString("de")} / ${st.gesamt.toLocaleString("de")}` : ""}`;
+    D.timer = setTimeout(() => ladeDubletten().catch(() => {}), 800);
+    return;
+  }
+  if (st.phase === "fehler") $("#d-meldung").textContent = st.meldung;
+  if (d.ergebnis) {
+    if (st.phase !== "fehler") $("#d-meldung").textContent = `Stand ${datumText(d.ergebnis.zeit)}.${st.phase === "angehalten" ? " Die letzte Suche wurde angehalten." : ""}`;
+    D.gruppen = d.ergebnis.gruppen;
+    // Auswahl merken, solange die Gruppe noch da ist
+    const neu = new Map();
+    D.gruppen.forEach((g) => {
+      const alt = D.wahl.get(g.nr);
+      const ids = new Set(g.bilder.map((b) => b.id));
+      const k = alt ? new Set([...alt].filter((i) => ids.has(i))) : null;
+      neu.set(g.nr, k && k.size ? k : new Set(g.bilder.filter((b) => b.behalten).map((b) => b.id)));
+    });
+    D.wahl = neu;
+    zeichneDubletten();
+  }
+}
+
+function dubAngezeigt() { const f = $("#d-filter").value; return D.gruppen.filter((g) => !f || g.art === f); }
+
+function dubWeg(g) { const k = D.wahl.get(g.nr); return g.bilder.filter((b) => !k.has(b.id)); }
+
+function zeichneDubletten() {
+  const gr = dubAngezeigt();
+  const wegAlle = gr.flatMap(dubWeg);
+  const exakt = D.gruppen.filter((g) => g.art === "exakt").length;
+  $("#d-zaehler").innerHTML = D.gruppen.length ? `
+    <div><b>${D.gruppen.length.toLocaleString("de")}</b>Gruppen</div>
+    <div><b>${exakt.toLocaleString("de")}</b>exakt gleich</div>
+    <div><b>${(D.gruppen.length - exakt).toLocaleString("de")}</b>ähnlich</div>
+    <div><b>${gbText(wegAlle.reduce((s, b) => s + b.groesse, 0))}</b>frei durch Aussortieren</div>` : "";
+  $("#d-sammel").hidden = !D.gruppen.length;
+  $("#d-alle").textContent = `Alle angezeigten bereinigen (${wegAlle.length.toLocaleString("de")} Dateien)`;
+  $("#d-alle").disabled = !wegAlle.length;
+  if (!D.gruppen.length) {
+    $("#d-gruppen").innerHTML = `<div class="karte hinweis">Keine Dubletten gefunden.</div>`;
+    return;
+  }
+  // bei sehr vielen Gruppen nur die ersten zeichnen; „Alle angezeigten“ gilt trotzdem für alle
+  const zeigen = gr.slice(0, 150);
+  $("#d-gruppen").innerHTML = zeigen.map((g) => {
+    const k = D.wahl.get(g.nr);
+    const maxPx = Math.max(...g.bilder.map((b) => (b.breite || 0) * (b.hoehe || 0)));
+    const weg = dubWeg(g);
+    return `<div class="d-gruppe" data-nr="${g.nr}">
+      <div class="d-kopf"><div><span class="d-art ${g.art}">${g.art === "exakt" ? "Exakt gleich" : "Ähnlich"}</span>
+        <span class="hinweis">Vorschlag behalten: ${esc(g.gruende.join(", "))}</span></div>
+        <div class="zeile"><span class="hinweis">${weg.length} aussortieren · ${gbText(weg.reduce((s, b) => s + b.groesse, 0))}</span>
+          <button class="knopf" data-bereinigen="${g.nr}" ${weg.length && k.size ? "" : "disabled"}>Gruppe bereinigen</button></div></div>
+      <div class="d-bilder">${g.bilder.map((b) => {
+        const beh = k.has(b.id);
+        const px = (b.breite || 0) * (b.hoehe || 0);
+        return `<div class="d-bild ${beh ? "behalten" : "weg"}" data-id="${b.id}" title="Klick: behalten / aussortieren · Doppelklick: groß ansehen">
+          <img src="/api/vorschau/${b.id}" loading="lazy" alt="">
+          <div class="d-info"><b>${esc(b.name)}</b><span class="hinweis">${esc(b.ordner)}</span>
+            <span class="${px === maxPx && px ? "d-besser" : ""}">${b.breite && b.hoehe ? `${b.breite} × ${b.hoehe}` : "Größe unbekannt"} · ${groesseText(b.groesse)}</span>
+            <span>${esc(datumText(b.datum))} <span class="hinweis">(${b.datum_quelle === "exif" ? "Kamera" : esc(b.datum_quelle || "")})</span></span>
+            ${b.kamera ? `<span class="hinweis">${esc(b.kamera)}</span>` : ""}</div>
+          <div class="d-status"><span>${beh ? "✓ Behalten" : "✕ Aussortieren"}</span><button data-explorer="${b.id}" title="Im Explorer zeigen">Ordner öffnen</button></div>
+        </div>`;
+      }).join("")}</div></div>`;
+  }).join("") + (gr.length > zeigen.length ? `<div class="hinweis">… und ${gr.length - zeigen.length} weitere Gruppen. „Alle angezeigten bereinigen“ gilt auch für diese.</div>` : "");
+}
+
+$("#d-filter").onchange = zeichneDubletten;
+
+$("#d-gruppen").addEventListener("click", (ev) => {
+  const ex = ev.target.closest("[data-explorer]");
+  if (ex) { ev.stopPropagation(); api(`/api/bilder/${ex.dataset.explorer}/explorer`, { method: "POST" }).catch((e) => toast(e.message, true)); return; }
+  const knopf = ev.target.closest("[data-bereinigen]");
+  if (knopf) { dubBereinigen(D.gruppen.filter((g) => g.nr === +knopf.dataset.bereinigen)); return; }
+  const kachel = ev.target.closest(".d-bild");
+  if (!kachel) return;
+  const g = D.gruppen.find((x) => x.nr === +kachel.closest(".d-gruppe").dataset.nr);
+  const k = D.wahl.get(g.nr), id = +kachel.dataset.id;
+  if (k.has(id)) {
+    if (k.size === 1) { toast("Mindestens ein Bild der Gruppe bleibt erhalten."); return; }
+    k.delete(id);
+  } else k.add(id);
+  zeichneDubletten();
+});
+$("#d-gruppen").addEventListener("dblclick", (ev) => {
+  const kachel = ev.target.closest(".d-bild");
+  if (!kachel) return;
+  $("#vollbild-img").src = `/api/ansicht/${kachel.dataset.id}?kante=3000`;
+  $("#vollbild").hidden = false;
+});
+
+async function dubBereinigen(gruppen) {
+  const auftrag = gruppen.map((g) => ({ nr: g.nr, behalten: [...D.wahl.get(g.nr)], weg: dubWeg(g).map((b) => b.id) }))
+    .filter((g) => g.weg.length && g.behalten.length);
+  const n = auftrag.reduce((s, g) => s + g.weg.length, 0);
+  if (!n) return;
+  const ziel = $("input[name=d-ziel]:checked").value;
+  const quarantaene = $("#d-quarantaene").value.trim();
+  const bytes = gruppen.flatMap(dubWeg).reduce((s, b) => s + b.groesse, 0);
+  const ort = ziel === "papierkorb" ? "in den Windows-Papierkorb gelegt." : `in den Quarantäne-Ordner verschoben:<br><span class="hinweis">${esc(quarantaene)}</span>`;
+  const aehnlich = gruppen.filter((g) => g.art === "aehnlich").length;
+  const ok = await frage(gruppen.length > 1 ? `${gruppen.length.toLocaleString("de")} Gruppen bereinigen?` : "Gruppe bereinigen?",
+    `<b>${n.toLocaleString("de")}</b> ${n === 1 ? "Datei" : "Dateien"} (${gbText(bytes)}) ${n === 1 ? "wird" : "werden"} ${ort}<br><br>Je Gruppe bleibt das grün markierte Bild an seinem Platz.`
+    + (aehnlich && gruppen.length > 1 ? `<br>${aehnlich.toLocaleString("de")} Gruppen sind nur ähnlich, nicht exakt gleich. Am besten vorher kurz durchsehen.` : "")
+    + `<br>Rückgängig unter „Sortieren → Bisherige Läufe“.`, "Bereinigen");
+  if (!ok) return;
+  try {
+    const r = await api("/api/dubletten/bereinigen", { json: { ziel, quarantaene, gruppen: auftrag } });
+    toast(`${r.erledigt.length.toLocaleString("de")} Dateien aussortiert (${gbText(r.bytes)})`);
+    if (r.fehler.length) await frage("Nicht alles hat geklappt", r.fehler.slice(0, 15).map(esc).join("<br>"), "OK");
+    await ladeDubletten();
+  } catch (e) { toast(e.message, true); }
+}
+$("#d-alle").onclick = () => dubBereinigen(dubAngezeigt());
+
+$("#d-suchen").onclick = async () => {
+  try {
+    const d = await api("/api/dubletten");
+    if (d.status.laeuft) await api("/api/dubletten/stop", { method: "POST" });
+    else { await api("/api/dubletten/suchen", { method: "POST" }); D.wahl = new Map(); }
+    ladeDubletten();
+  } catch (e) { toast(e.message, true); }
+};
 
 /* ------------------------------------------------------------ Einstellungen */
 

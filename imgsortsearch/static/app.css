@@ -217,3 +217,26 @@ main { min-width: 0; min-height: 0; position: relative; }
 .quelle.fehlt span { color: var(--schlecht); }
 .quelle.fehlt small { color: var(--schlecht); margin-left: 8px; white-space: nowrap; }
 #index-knopf:disabled { opacity: .7; cursor: progress; }
+
+/* ---------- Dubletten ---------- */
+.abstand-oben { margin-top: 12px; }
+.d-gruppen { display: flex; flex-direction: column; gap: 14px; margin-top: 18px; }
+.d-gruppe { background: var(--flaeche); border: 1px solid var(--linie); border-radius: 14px; padding: 14px 16px; }
+.d-kopf { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.d-kopf .hinweis { margin-left: 8px; }
+.d-art { font-size: 12px; padding: 2px 9px; border-radius: 20px; background: rgba(34,211,238,.15); border: 1px solid rgba(34,211,238,.4); }
+.d-art.aehnlich { background: rgba(245,158,11,.15); border-color: rgba(245,158,11,.45); }
+.d-bilder { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+.d-bild { background: var(--bg2); border: 2px solid var(--linie); border-radius: 11px; overflow: hidden; cursor: pointer; display: flex; flex-direction: column; transition: .15s; user-select: none; }
+.d-bild.behalten { border-color: var(--gut); }
+.d-bild.weg { opacity: .62; border-color: rgba(239,68,68,.55); }
+.d-bild img { width: 100%; height: 170px; object-fit: contain; background: #0b0d12; display: block; }
+.d-info { padding: 8px 10px; font-size: 12.5px; display: flex; flex-direction: column; gap: 2px; word-break: break-all; }
+.d-info b { font-size: 13px; }
+.d-info .hinweis { font-size: 12px; }
+.d-status { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; font-size: 12px; font-weight: 600; border-top: 1px solid var(--linie); margin-top: auto; }
+.d-bild.behalten .d-status { color: var(--gut); }
+.d-bild.weg .d-status { color: var(--schlecht); }
+.d-status button { all: unset; cursor: pointer; color: var(--text3); font-weight: 400; }
+.d-status button:hover { color: var(--akzent2); }
+.d-besser { color: var(--gut); }

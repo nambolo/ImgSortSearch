@@ -18,6 +18,7 @@
       <button data-ansicht="themen"><i>◈</i>Themen &amp; Kategorien</button>
       <button data-ansicht="personen"><i>☺</i>Personen</button>
       <button data-ansicht="sortieren"><i>⇄</i>Sortieren</button>
+      <button data-ansicht="dubletten"><i>⧉</i>Dubletten</button>
       <button data-ansicht="einstellungen"><i>⚙</i>Einstellungen</button>
     </nav>
     <div class="kategorie-zahlen" id="kat-zahlen"></div>
@@ -161,6 +162,36 @@
           <div id="protokolle"></div>
         </div>
       </div>
+    </section>
+
+    <!-- ======================= Dubletten ======================= -->
+    <section id="ansicht-dubletten" class="ansicht">
+      <header class="titel"><div><h1>Dubletten</h1><p>Findet gleiche und fast gleiche Bilder, z. B. verkleinerte WhatsApp-Kopien. Es wird nichts gelöscht: Aussortiertes kommt in die Quarantäne oder den Papierkorb und lässt sich zurückholen.</p></div>
+        <button class="knopf primaer" id="d-suchen">Dubletten suchen</button></header>
+      <div class="spalten">
+        <div class="karte">
+          <h2>Wohin mit aussortierten Bildern?</h2>
+          <div class="optionen">
+            <label><input type="radio" name="d-ziel" value="quarantaene" checked><span><b>Quarantäne-Ordner</b><small>In einen eigenen Ordner verschieben, die Ordnerstruktur bleibt erkennbar (empfohlen)</small></span></label>
+            <label id="d-papierkorb-wahl"><input type="radio" name="d-ziel" value="papierkorb"><span><b>Windows-Papierkorb</b><small>Wie Löschen im Explorer, Platz wird erst beim Leeren frei</small></span></label>
+          </div>
+          <div class="feld" id="d-quarantaene-feld"><label>Quarantäne-Ordner</label>
+            <div class="zeile"><input id="d-quarantaene"><button class="knopf leicht" id="d-quarantaene-waehlen">Wählen …</button></div>
+            <small>Wird beim Indexlauf nicht als neue Bilder aufgenommen. Am schnellsten auf demselben Laufwerk wie die Bilder.</small></div>
+        </div>
+        <div class="karte">
+          <h2>Ergebnis</h2>
+          <div id="d-meldung" class="hinweis">Noch nicht gesucht. Die Suche nutzt den vorhandenen Index, es wird nichts neu analysiert.</div>
+          <div class="balken" id="d-balken-box" hidden><div id="d-balken"></div></div>
+          <div class="zaehler abstand-oben" id="d-zaehler"></div>
+          <div class="zeile abstand-oben" id="d-sammel" hidden>
+            <select id="d-filter"><option value="">Alle Gruppen</option><option value="exakt">Nur exakt gleiche</option><option value="aehnlich">Nur ähnliche</option></select>
+            <button class="knopf primaer" id="d-alle">Alle angezeigten bereinigen</button>
+          </div>
+          <p class="hinweis">Klick auf ein Bild wechselt zwischen Behalten und Aussortieren. Jeder Lauf lässt sich unter „Sortieren → Bisherige Läufe“ rückgängig machen.</p>
+        </div>
+      </div>
+      <div id="d-gruppen" class="d-gruppen"></div>
     </section>
 
     <!-- ======================= Einstellungen ======================= -->

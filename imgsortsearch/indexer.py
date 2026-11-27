@@ -81,6 +81,10 @@ def bilder_im_ordner(db: Datenbank, ordner: str, ausser: list[str] = ()) -> list
             if _unter(r["pfad"], [ordner]) and not _unter(r["pfad"], list(ausser))]
 
 
+def quarantaene_ordner(e: Einstellungen) -> Path:
+    return Path((e.get("dubletten") or {}).get("quarantaene") or (daten_ordner() / "dubletten-quarantaene"))
+
+
 def vorschau_erzeugen(bild_id: int, img) -> Path:
     p = vorschau_pfad(bild_id)
     klein = img.copy()
@@ -298,6 +302,10 @@ class Indexer:
         if ziel and _unter(str(Path(ziel)), erreichbar) and not any(
                 _unter(q, [str(Path(ziel))]) for q in erreichbar):  # Ziel liegt echt innerhalb einer Quelle
             gefunden = [p for p in gefunden if str(p) in bekannt or not _unter(str(p), [str(Path(ziel))])]
+
+        # aussortierte Dubletten im Quarantäne-Ordner nicht wieder aufnehmen
+        quarantaene = str(quarantaene_ordner(self.e))
+        gefunden = [p for p in gefunden if not _unter(str(p), [quarantaene])]
 
         neu_oder_geaendert = []
         for p in gefunden:
