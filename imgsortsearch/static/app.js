@@ -47,7 +47,7 @@ function frage(titel, html, jaText = "OK", drittesText = "") {
 }
 
 const S = {
-  einst: null, kategorien: [], farben: {},
+  einst: null, kategorien: [], zusatz: [], farben: {},
   bilder: [], gesamt: 0, gewaehlt: new Set(), letzter: null, fokus: null,
   modus: localStorage.getItem("modus") || "raster",
   person: null, personName: "", aehnlich: null, bildSuche: null,
@@ -158,12 +158,16 @@ async function ladeFilter() {
   };
   fill($("#f-kategorie"), f.kategorien, "Alle Kategorien");
   fill($("#f-jahr"), f.jahre, "Alle Jahre");
+  const th = $("#f-thema"), altThema = th.value;
+  th.innerHTML = `<option value="">Alle Themen</option>` + (f.themen || []).map((t) =>
+    `<option value="${esc(t.name)}">${esc(t.name)} (${t.anzahl.toLocaleString("de")})</option>`).join("");
+  th.value = altThema;
   fill($("#f-kamera"), f.kameras.filter(Boolean), "Alle Kameras");
 }
 
 function suchParameter(offset) {
   const p = new URLSearchParams({
-    q: $("#q").value, art: $("#art").value, kategorie: $("#f-kategorie").value, jahr: $("#f-jahr").value,
+    q: $("#q").value, art: $("#art").value, kategorie: $("#f-kategorie").value, thema: $("#f-thema").value, jahr: $("#f-jahr").value,
     kamera: $("#f-kamera").value, sortierung: $("#f-sort").value, offset, limit: 240,
   });
   if (S.person) p.set("person", S.person);
@@ -210,7 +214,11 @@ function zeigeTreffer(gesamt, bilder, text) {
 }
 
 function marke(b) {
-  return `<span class="marke ${b.manuell ? "hand" : ""}" style="box-shadow: inset 3px 0 0 ${farbe(b.kategorie)}">${esc(b.kategorie)}</span>`;
+  const zusatz = (b.zusatz || []).map((k) => `<span class="zusatz-punkt" style="background:${farbe(k)}" title="${esc(k)}"></span>`).join("");
+  return `<span class="marke ${b.manuell ? "hand" : ""}" style="box-shadow: inset 3px 0 0 ${farbe(b.kategorie)}">${esc(b.kategorie)}${zusatz}</span>`;
+}
+function zusatzText(b) {
+  return (b.zusatz || []).map((k) => ` · <span style="color:${farbe(k)}">${esc(k)}</span>`).join("");
 }
 
 function zeichneErgebnis() {
@@ -224,7 +232,7 @@ function zeichneErgebnis() {
     $("#liste").innerHTML = S.bilder.map((b) =>
       `<div class="eintrag ${S.gewaehlt.has(b.id) ? "gewaehlt" : ""} ${S.fokus === b.id ? "fokus" : ""}" data-id="${b.id}">
         <img loading="lazy" src="/api/vorschau/${b.id}" alt="">
-        <div><div class="n">${esc(b.name)}</div><div class="m">${esc(datumText(b.datum))} · <span style="color:${farbe(b.kategorie)}">${esc(b.kategorie)}</span>${b.tags ? " · " + esc(b.tags) : ""}</div></div></div>`).join("") + mehr;
+        <div><div class="n">${esc(b.name)}</div><div class="m">${esc(datumText(b.datum))} · <span style="color:${farbe(b.kategorie)}">${esc(b.kategorie)}</span>${zusatzText(b)}${b.tags ? " · " + esc(b.tags) : ""}</div></div></div>`).join("") + mehr;
     if (!S.bilder.length) $("#detail").innerHTML = `<div class="leer">Keine Treffer</div>`;
   }
   const m = $("#mehr-laden");
@@ -277,7 +285,56 @@ function auswahlLeiste() {
   $("#auswahl-kategorien").innerHTML = S.kategorien.map((k) =>
     `<button class="kat-knopf" data-kat="${esc(k)}" style="border-color:${farbe(k)}">${esc(k)}</button>`).join("");
   $$("#auswahl-kategorien button").forEach((b) => b.onclick = () => kategorieSetzen([...S.gewaehlt], b.dataset.kat));
+  // Zusatzkategorien: Haben alle markierten Bilder sie schon, nimmt ein Klick sie wieder weg
+  const gewaehlt = S.bilder.filter((b) => S.gewaehlt.has(b.id));
+  $("#auswahl-zusatz").hidden = !S.zusatz.length;
+  $("#auswahl-zusatz").innerHTML = S.zusatz.map((k) => {
+    const alle = gewaehlt.length > 0 && gewaehlt.every((b) => (b.zusatz || []).includes(k));
+    const einige = !alle && gewaehlt.some((b) => (b.zusatz || []).includes(k));
+    return `<button class="kat-knopf zusatz ${alle ? "aktiv" : ""} ${einige ? "teils" : ""}" data-kat="${esc(k)}" data-an="${alle ? 0 : 1}"
+      title="${alle ? "Bei allen markierten Bildern entfernen" : "Allen markierten Bildern hinzufügen"}"
+      style="${alle ? `background:${farbe(k)}` : `border-color:${farbe(k)}`}">${alle ? "✓ " : "+ "}${esc(k)}</button>`;
+  }).join("");
+  $$("#auswahl-zusatz button").forEach((b) => b.onclick = () => zusatzSetzen([...S.gewaehlt], b.dataset.kat, b.dataset.an === "1"));
 }
+
+async function zusatzSetzen(ids, kat, an) {
+  try {
+    await api("/api/bilder/zusatz", { json: { ids, kategorie: kat, an } });
+    S.bilder.forEach((b) => {
+      if (!ids.includes(b.id)) return;
+      const z = new Set(b.zusatz || []);
+      if (an) z.add(kat); else z.delete(kat);
+      b.zusatz = S.zusatz.filter((k) => z.has(k));
+    });
+    zeichneErgebnis();
+    if (S.modus === "liste" && S.fokus) zeigeDetail(S.fokus);
+    status();
+    toast(an ? `${ids.length} Bild(er) + ${kat}` : `${ids.length} Bild(er) ohne ${kat}`);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function neuBewerten(ids) {
+  const w = await frage("Neu bewerten",
+    `<p>${ids.length.toLocaleString("de-DE")} Bild(er) neu bewerten.</p>
+     <p><b>Neu einordnen</b> wendet Themen, Uhrzeit und Regeln erneut an. Das geht in Sekunden.</p>
+     <p><b>Komplett neu analysieren</b> erkennt Bildinhalt, Gesichter und Text noch einmal. Das dauert je Bild etwas.</p>
+     <p>Kategorien, die du von Hand gesetzt hast, bleiben in beiden Fällen erhalten.</p>`,
+    "Komplett neu analysieren", "Neu einordnen");
+  if (w === false) return;
+  try {
+    if (w === true) {
+      const r = await api("/api/bilder/neu-analysieren", { json: { ids } });
+      toast(r.gestartet ? `${r.vorgemerkt} Bild(er) werden neu analysiert …` : `${r.vorgemerkt} Bild(er) vorgemerkt. Sie kommen im nächsten Indexlauf dran.`);
+    } else {
+      await api("/api/einordnen", { method: "POST" });
+      toast("Neu eingeordnet");
+      suchen(false, true);
+    }
+    status();
+  } catch (e) { toast(e.message, true); }
+}
+$("#auswahl-neu").onclick = () => neuBewerten([...S.gewaehlt]);
 
 $("#raster").addEventListener("click", (e) => { const k = e.target.closest(".kachel"); if (k) waehle(+k.dataset.id, e); });
 $("#raster").addEventListener("dblclick", (e) => { const k = e.target.closest(".kachel"); if (k) { setzeModus("liste"); S.fokus = +k.dataset.id; zeichneErgebnis(); zeigeDetail(S.fokus); scrolleZuFokus(); } });
@@ -334,6 +391,12 @@ async function zeigeDetail(id) {
           <div class="zeile"><button class="knopf leicht" id="d-aehnlich">Ähnliche</button><button class="knopf leicht" id="d-explorer">Im Explorer</button><button class="knopf" id="d-kopieren">Kopieren</button></div></div>
         <div class="kat-knoepfe">${S.kategorien.map((k) => `<button class="kat-knopf ${k === kat ? "aktiv" : ""}" data-kat="${esc(k)}" style="${k === kat ? `background:${farbe(k)}` : `border-color:${farbe(k)}`}">${esc(k)}</button>`).join("")}
           ${b.kategorie_manuell ? `<button class="kat-knopf" data-kat="">↺ automatisch</button>` : ""}</div>
+        ${S.zusatz.length ? `<div class="kat-knoepfe">${S.zusatz.map((k) => {
+          const an = (b.zusatz || []).includes(k);
+          return `<button class="kat-knopf zusatz ${an ? "aktiv" : ""}" data-zusatz="${esc(k)}" data-an="${an ? 0 : 1}"
+            title="${k in (b.zusatz_hand || {}) ? "von Hand gesetzt" : "automatisch"}"
+            style="${an ? `background:${farbe(k)}` : `border-color:${farbe(k)}`}">${an ? "✓ " : "+ "}${esc(k)}</button>`;
+        }).join("")}</div>` : ""}
         ${b.beschreibung ? `<div>${esc(b.beschreibung)}</div>` : ""}
         ${b.tags ? `<div class="tags">${b.tags.split(",").map((t) => `<span class="tag">${esc(t.trim())}</span>`).join("")}</div>` : ""}
         <dl class="meta">
@@ -351,7 +414,8 @@ async function zeigeDetail(id) {
     $("#d-aehnlich").onclick = () => aehnlicheZeigen(id, b.name);
     $("#d-explorer").onclick = () => api(`/api/bilder/${id}/explorer`, { method: "POST" }).catch((e) => toast(e.message, true));
     $("#d-kopieren").onclick = () => { S.gewaehlt = new Set([id]); aktualisiereAuswahl(); kopieren(); };
-    $$(".detail-info .kat-knopf").forEach((k) => k.onclick = () => kategorieSetzen([id], k.dataset.kat || null));
+    $$(".detail-info .kat-knopf[data-kat]").forEach((k) => k.onclick = () => kategorieSetzen([id], k.dataset.kat || null));
+    $$(".detail-info .kat-knopf[data-zusatz]").forEach((k) => k.onclick = () => zusatzSetzen([id], k.dataset.zusatz, k.dataset.an === "1"));
   } catch (e) { d.innerHTML = `<div class="leer">${esc(e.message)}</div>`; }
 }
 
@@ -386,7 +450,7 @@ $$("#ansicht-umschalter button").forEach((b) => b.onclick = () => { setzeModus(b
 let tipp;
 $("#q").addEventListener("input", () => { clearTimeout(tipp); tipp = setTimeout(() => suchen(), 350); });
 $("#q").addEventListener("keydown", (e) => { if (e.key === "Enter") { clearTimeout(tipp); suchen(); } });
-["#art", "#f-kategorie", "#f-jahr", "#f-kamera", "#f-sort"].forEach((s) => $(s).addEventListener("change", () => suchen()));
+["#art", "#f-kategorie", "#f-thema", "#f-jahr", "#f-kamera", "#f-sort"].forEach((s) => $(s).addEventListener("change", () => suchen()));
 $("#groesse").addEventListener("input", (e) => document.documentElement.style.setProperty("--kachel", e.target.value + "px"));
 
 $("#bild-suche").addEventListener("change", async (e) => {
@@ -446,11 +510,16 @@ async function ladeThemen() {
 function zeichneThemen() {
   const kats = themenDaten.kategorien;
   $("#kat-liste").innerHTML = kats.map((k, i) =>
-    `<div class="kat-eintrag"><input type="color" value="${esc(k.farbe || FARBEN[i % FARBEN.length])}" data-i="${i}"><span>${esc(k.name)}</span>
+    `<div class="kat-eintrag ${k.zusatz ? "zusatz" : ""}"><input type="color" value="${esc(k.farbe || FARBEN[i % FARBEN.length])}" data-i="${i}"><span>${esc(k.name)}</span>
+      <label class="kat-art" title="Zusatzkategorie: schließt andere Kategorien nicht aus, ein Bild kann mehrere davon haben"><input type="checkbox" data-zusatz="${i}" ${k.zusatz ? "checked" : ""}>zusätzlich</label>
       <button data-weg="${i}" title="Kategorie entfernen">✕</button></div>`).join("");
   $$("#kat-liste input[type=color]").forEach((c) => c.oninput = () => { kats[c.dataset.i].farbe = c.value; });
+  $$("#kat-liste [data-zusatz]").forEach((c) => c.onchange = () => { kats[c.dataset.zusatz].zusatz = c.checked; zeichneThemen(); });
   $$("#kat-liste [data-weg]").forEach((b) => b.onclick = () => { kats.splice(+b.dataset.weg, 1); zeichneThemen(); });
-  const optionen = (wert) => `<option value="">nur Schlagwort</option>` + kats.map((k) => `<option ${k.name === wert ? "selected" : ""}>${esc(k.name)}</option>`).join("");
+  const opt = (k, wert) => `<option value="${esc(k.name)}" ${k.name === wert ? "selected" : ""}>${esc(k.name)}</option>`;
+  const optionen = (wert) => `<option value="">nur Schlagwort</option>`
+    + `<optgroup label="Kategorie">${kats.filter((k) => !k.zusatz).map((k) => opt(k, wert)).join("")}</optgroup>`
+    + (kats.some((k) => k.zusatz) ? `<optgroup label="Zusätzlich">${kats.filter((k) => k.zusatz).map((k) => opt(k, wert)).join("")}</optgroup>` : "");
   $("#themen-gitter").innerHTML = themenDaten.themen.map((t, i) =>
     `<div class="thema" style="border-left-color:${farbeAus(kats, t.kategorie)}">
       <div class="kopf"><b>${esc(t.name)}</b><span class="anzahl" data-zeige="${i}" title="Bilder zu diesem Thema anzeigen">${t.anzahl.toLocaleString("de")} Bilder</span></div>
@@ -461,14 +530,23 @@ function zeichneThemen() {
   $$("[data-prompt]").forEach((el) => el.onchange = () => { themenDaten.themen[el.dataset.prompt].prompt = el.value; });
   $$("[data-kat]", $("#themen-gitter")).forEach((el) => el.onchange = () => { themenDaten.themen[el.dataset.kat].kategorie = el.value; zeichneThemen(); });
   $$(".thema [data-weg]").forEach((el) => el.onclick = () => { themenDaten.themen.splice(+el.dataset.weg, 1); zeichneThemen(); });
-  $$("[data-zeige]").forEach((el) => el.onclick = () => { const t = themenDaten.themen[el.dataset.zeige]; $("#q").value = t.name; $("#art").value = "bedeutung"; zeige("suche"); suchen(); });
+  $$("[data-zeige]").forEach((el) => el.onclick = async () => {
+    const t = themenDaten.themen[el.dataset.zeige];
+    await ladeFilter().catch(() => {});
+    $("#q").value = ""; $("#f-kategorie").value = "";
+    $("#f-thema").value = t.name;
+    if ($("#f-thema").value !== t.name) { $("#q").value = t.name; $("#art").value = "bedeutung"; }  // noch keinem Bild zugeordnet
+    zeige("suche"); suchen();
+  });
 }
 function farbeAus(kats, name) { const i = kats.findIndex((k) => k.name === name); return i < 0 ? "#2a3042" : (kats[i].farbe || FARBEN[i % FARBEN.length]); }
 
 $("#kat-neu").onclick = () => {
   const n = $("#neue-kat").value.trim();
   if (!n || themenDaten.kategorien.some((k) => k.name === n)) return;
-  themenDaten.kategorien.push({ name: n, farbe: FARBEN[themenDaten.kategorien.length % FARBEN.length] });
+  const neu = { name: n, farbe: FARBEN[themenDaten.kategorien.length % FARBEN.length] };
+  if ($("#neue-kat-zusatz").checked) neu.zusatz = true;
+  themenDaten.kategorien.push(neu);
   $("#neue-kat").value = "";
   zeichneThemen();
 };
@@ -485,7 +563,7 @@ $("#themen-speichern").onclick = async () => {
     await api("/api/einstellungen", { json: { themen, kategorien: themenDaten.kategorien } });
     await ladeGrundlagen();
     toast("Gespeichert. Bilder werden neu eingeordnet …");
-    setTimeout(() => { ladeThemen(); suchen(); }, 1500);
+    setTimeout(() => { ladeThemen(); ladeFilter().catch(() => {}); suchen(); }, 1500);
   } catch (e) { toast(e.message, true); }
 };
 
@@ -573,7 +651,8 @@ async function ladeSortieren() {
   $("#s-umbenennen").checked = !!s.umbenennen;
   $("#s-name").value = s.name;
   $("#s-tags").value = s.tags;
-  $("#s-nur").innerHTML = [...S.kategorien, "Unklar"].map((k) => `<label><input type="checkbox" value="${esc(k)}" ${k !== "Unklar" ? "checked" : ""}>${esc(k)}</label>`).join("");
+  $("#s-nur").innerHTML = [...S.kategorien, "Unklar"].map((k) => `<label><input type="checkbox" value="${esc(k)}" ${k !== "Unklar" ? "checked" : ""}>${esc(k)}</label>`).join("")
+    + S.zusatz.map((k) => `<label title="Zusatzkategorie: Bilder damit zusätzlich mitnehmen"><input type="checkbox" value="${esc(k)}">+ ${esc(k)}</label>`).join("");
   sortierFelder();
   ladeProtokolle();
 }
@@ -890,7 +969,9 @@ $("#e-speichern").onclick = async () => {
 
 async function ladeGrundlagen() {
   S.einst = await api("/api/einstellungen");
-  S.kategorien = S.einst.kategorien.map((k) => k.name);
+  // Hauptkategorien: genau eine pro Bild (Ordner beim Sortieren). Zusatzkategorien: beliebig viele pro Bild.
+  S.kategorien = S.einst.kategorien.filter((k) => !k.zusatz).map((k) => k.name);
+  S.zusatz = S.einst.kategorien.filter((k) => k.zusatz).map((k) => k.name);
   S.farben = { Unklar: "#64748b" };
   S.einst.kategorien.forEach((k, i) => { S.farben[k.name] = k.farbe || FARBEN[i % FARBEN.length]; });
 }

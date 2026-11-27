@@ -54,6 +54,7 @@
       </header>
       <div class="filter">
         <select id="f-kategorie"><option value="">Alle Kategorien</option></select>
+        <select id="f-thema" title="Vom Programm erkannte Bildinhalte"><option value="">Alle Themen</option></select>
         <select id="f-jahr"><option value="">Alle Jahre</option></select>
         <select id="f-kamera"><option value="">Alle Kameras</option></select>
         <select id="f-sort">
@@ -81,7 +82,9 @@
       <div class="auswahl-leiste" id="auswahl-leiste" hidden>
         <span id="auswahl-zahl"></span>
         <div class="kat-knoepfe" id="auswahl-kategorien"></div>
+        <div class="kat-knoepfe" id="auswahl-zusatz" hidden></div>
         <button class="knopf leicht" id="auswahl-auto" title="Wieder automatisch einordnen">Automatisch</button>
+        <button class="knopf leicht" id="auswahl-neu" title="Markierte Bilder neu einordnen oder neu analysieren">Neu bewerten</button>
         <button class="knopf" id="auswahl-kopieren" title="In die Zwischenablage (Strg+C), im Explorer mit Strg+V einfügen">Kopieren</button>
         <button class="knopf leicht" id="auswahl-weg">✕</button>
       </div>
@@ -96,9 +99,11 @@
       </header>
       <div class="karte">
         <h2>Kategorien</h2>
-        <p class="hinweis">Jedes Bild landet in genau einer Kategorie (oder „Unklar“). Daraus werden beim Sortieren die Ordner.</p>
+        <p class="hinweis">Jedes Bild landet in genau einer Kategorie (oder „Unklar“). Daraus werden beim Sortieren die Ordner.
+          Kategorien mit Haken bei <b>zusätzlich</b> schließen andere nicht aus: Ein Bild kann z. B. Arbeit sein und zugleich
+          Natur und Familie. Sie landen als Schlagwort in den Tags. Ein Thema, das auf eine Zusatzkategorie zeigt, vergibt sie automatisch.</p>
         <div class="kat-liste" id="kat-liste"></div>
-        <div class="zeile"><input id="neue-kat" placeholder="Neue Kategorie, z. B. Natur"><button class="knopf" id="kat-neu">Hinzufügen</button></div>
+        <div class="zeile"><input id="neue-kat" placeholder="Neue Kategorie, z. B. Natur"><label class="kat-art"><input type="checkbox" id="neue-kat-zusatz" checked>zusätzlich (schließt andere nicht aus)</label><button class="knopf" id="kat-neu">Hinzufügen</button></div>
       </div>
       <div class="karte">
         <div class="zeile zwischen"><h2>Themen</h2>
