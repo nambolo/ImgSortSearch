@@ -160,3 +160,29 @@ def test_manuelle_kategorie(client, zustand):
 def test_ui_wird_ausgeliefert(client):
     r = client.get("/")
     assert r.status_code == 200 and "ImgSortSearch" in r.text
+
+
+def test_suche_per_foto_mit_filtern(client, zustand):
+    """Filter der Suchleiste grenzen die Suche per Foto ein, statt sie zu beenden (Oberflächentest 27.11.)."""
+    import io
+    from PIL import Image
+    client.post("/api/index/start")
+    warte_auf_index(client)
+
+    def foto(farbe):
+        puffer = io.BytesIO()
+        Image.new("RGB", (50, 50), farbe).save(puffer, "JPEG")
+        return {"datei": ("ref.jpg", puffer.getvalue(), "image/jpeg")}
+
+    alle = client.post("/api/suche-mit-bild", files=foto((240, 10, 10))).json()
+    namen = [Path(b["pfad"]).name for b in alle["bilder"]]
+    assert {"a.jpg", "Screenshot_1.png"} <= set(namen)  # Screenshot ohne Aufnahmedatum (Dateidatum: heute)
+    gefiltert = client.post("/api/suche-mit-bild?jahr=2024", files=foto((240, 10, 10))).json()
+    namen_2024 = [Path(b["pfad"]).name for b in gefiltert["bilder"]]
+    assert "a.jpg" in namen_2024 and "Screenshot_1.png" not in namen_2024
+    assert namen_2024 == [n for n in namen if n in namen_2024]  # Reihenfolge nach Ähnlichkeit bleibt
+
+    personen = client.post("/api/personensuche?jahr=2024", files=foto((10, 10, 240))).json()
+    assert {Path(b["pfad"]).name for b in personen["bilder"]} == {"c.jpg", "d.jpg"}
+    keine = client.post("/api/personensuche?jahr=2023", files=foto((10, 10, 240))).json()
+    assert keine["gesichter"] and keine["gesamt"] == 0
