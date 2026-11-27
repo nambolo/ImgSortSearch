@@ -109,6 +109,12 @@ class Datenbank:
             for spalte in ("ort", "ort_name", "ort_stadt", "ort_land", "ort_such", "ort_fuer"):
                 if spalte not in spalten:
                     v.execute(f"ALTER TABLE bilder ADD COLUMN {spalte} TEXT")
+            # ausführliche Beschreibung (eigener Schritt, lässt sich nachträglich für alle Bilder erzeugen)
+            for spalte, typ in (("beschreibung_lang", "TEXT"), ("beschreibung_lang_en", "TEXT"),
+                                ("beschreibung_lang_vek", "BLOB"), ("beschreibung_lang_modell", "TEXT"),
+                                ("schritt_lang", "INTEGER DEFAULT 0")):
+                if spalte not in spalten:
+                    v.execute(f"ALTER TABLE bilder ADD COLUMN {spalte} {typ}")
             v.execute("CREATE INDEX IF NOT EXISTS ix_bilder_gps ON bilder(gps_lat, gps_lon)")
             spalten = {r[1] for r in v.execute("PRAGMA table_info(gesichter)")}
             for spalte, typ in (("qualitaet", "REAL"), ("modell", "TEXT"), ("ignoriert", "INTEGER DEFAULT 0")):
@@ -172,10 +178,10 @@ class Datenbank:
                 personen.setdefault(p["bild_id"], []).append(p["name"])
             updates = []
             for r in self.abfrage("SELECT id, pfad, kamera, tags, ocr_text, schlagwoerter, beschreibung, "
-                                  f"beschreibung_en, zusatz, ort_such FROM bilder WHERE id IN ({platz})", teil):
+                                  f"beschreibung_en, beschreibung_lang, beschreibung_lang_en, zusatz, ort_such FROM bilder WHERE id IN ({platz})", teil):
                 teile = [r["pfad"], r["kamera"], r["tags"], r["ocr_text"], r["schlagwoerter"], r["beschreibung"],
                          r["beschreibung_en"], " ".join(personen.get(r["id"], [])), (r["zusatz"] or "").replace(",", " "),
-                         r["ort_such"]]
+                         r["ort_such"], r["beschreibung_lang"], r["beschreibung_lang_en"]]
                 updates.append((normalisiere(" ".join(t or "" for t in teile)), r["id"]))
             with self.verbindung() as v:
                 v.executemany("UPDATE bilder SET suchtext=? WHERE id=?", updates)
@@ -236,6 +242,20 @@ class Datenbank:
         mat = np.stack([blob_zu_vektor(z["clip"]) for z in zeilen])
         return ids, mat
 
+    def beschreibung_matrix(self) -> tuple[np.ndarray, np.ndarray]:
+        """(bild_ids, Matrix) der Satzvektoren der ausführlichen Beschreibungen, eine Zeile je Satz."""
+        ids, teile = [], []
+        for z in self.abfrage("SELECT id, beschreibung_lang_vek FROM bilder WHERE beschreibung_lang_vek IS NOT NULL"):
+            v = blob_zu_vektor(z["beschreibung_lang_vek"])
+            n = int(v[0])  # erster Wert: Zahl der Sätze
+            if n <= 0 or (len(v) - 1) % n:
+                continue
+            teile.append(v[1:].reshape(n, -1))
+            ids += [z["id"]] * n
+        if not teile or len({t.shape[1] for t in teile}) != 1:
+            return np.zeros(0, dtype=np.int64), np.zeros((0, 1), dtype=np.float32)
+        return np.array(ids, dtype=np.int64), np.concatenate(teile)
+
     def textvektoren(self, texte: list[str], kennung: str, clip=None) -> np.ndarray | None:
         """Textvektoren aus dem Zwischenspeicher, fehlende über ``clip`` berechnen.
         Ohne geladenes Modell und mit fehlenden Texten wird None geliefert."""
@@ -269,3 +289,9 @@ class Datenbank:
         return (np.array([z["id"] for z in zeilen], dtype=np.int64),
                 np.array([z["bild_id"] for z in zeilen], dtype=np.int64),
                 np.stack([blob_zu_vektor(z["vektor"]) for z in zeilen]))
+
+
+def saetze_zu_blob(mat: np.ndarray) -> bytes:
+    """Mehrere Satzvektoren in einem Feld: zuerst die Anzahl, dann die Vektoren."""
+    mat = np.asarray(mat, dtype=np.float32)
+    return vektor_zu_blob(np.concatenate([[float(len(mat))], mat.reshape(-1)]))
