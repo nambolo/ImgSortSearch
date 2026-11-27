@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+# lokale Installation und Daten (werden von install.bat angelegt)
+umgebung/
+daten/
