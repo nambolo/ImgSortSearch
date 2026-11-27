@@ -261,7 +261,7 @@ def ausfuehren(auftraege: list[Auftrag], s: dict, protokoll_ordner: Path, echt: 
 
     ``s``: Sortier-Einstellungen (ziel, modus, umbenennen, name, ordner, tags).
     Liefert Zusammenfassung, Vorschau-Liste und bei echten Läufen Protokolldatei
-    und Pfadänderungen (für den Index)."""
+    und Pfadänderungen (für den Index) als (bild_id, alter Pfad, neuer Pfad)."""
     modus = s.get("modus", "kopieren")
     if modus not in ("kopieren", "verschieben", "nur_taggen"):
         raise ValueError("Unbekannter Modus")
@@ -326,7 +326,7 @@ def ausfuehren(auftraege: list[Auftrag], s: dict, protokoll_ordner: Path, echt: 
                     alte_xmp = _sidecars(a.pfad)
                     shutil.move(str(a.pfad), str(neu))
                     schreibe({"op": "verschoben", "quelle": str(a.pfad), "ziel": str(neu), "bild_id": a.bild_id})
-                    pfad_aenderungen.append((a.bild_id, str(neu)))
+                    pfad_aenderungen.append((a.bild_id, str(a.pfad), str(neu)))
                     # vorhandene XMP-Dateien (z. B. Lightroom-Bearbeitungen) mitnehmen, sonst gehen sie verloren
                     for x in alte_xmp:
                         x_neu = neu.with_name(neu.name + ".xmp") if x.name.lower().endswith(
@@ -356,7 +356,7 @@ def ausfuehren(auftraege: list[Auftrag], s: dict, protokoll_ordner: Path, echt: 
                         schreibe({"op": "eingebettet", "ziel": str(neu), "sicherung": str(neu) + "_original",
                                   "sicherung_stand": _stand(Path(str(neu) + "_original")), "bild_id": a.bild_id})
                         # Dateigröße hat sich geändert: Index nachführen, sonst wird neu analysiert
-                        pfad_aenderungen.append((a.bild_id, str(neu)))
+                        pfad_aenderungen.append((a.bild_id, str(neu), str(neu)))
                 zaehler["ok"] += 1
             except Exception as ex:
                 zaehler["fehler"] += 1
@@ -391,7 +391,7 @@ def rueckgaengig(protokoll: Path, echt: bool = False) -> dict:
                     if echt:
                         quelle.parent.mkdir(parents=True, exist_ok=True)
                         shutil.move(str(ziel), str(quelle))
-                        pfad_aenderungen.append((e.get("bild_id"), str(quelle)))
+                        pfad_aenderungen.append((e.get("bild_id"), str(ziel), str(quelle)))
                     ordner.add(ziel.parent)
                 else:
                     probleme.append(f"Übersprungen (Ziel fehlt oder Quelle belegt): {ziel}")
@@ -414,7 +414,7 @@ def rueckgaengig(protokoll: Path, echt: bool = False) -> dict:
                     schritte.append(f"Metadaten wiederherstellen: {ziel}")
                     if echt:
                         sicherung.replace(ziel)
-                        pfad_aenderungen.append((e.get("bild_id"), str(ziel)))
+                        pfad_aenderungen.append((e.get("bild_id"), str(ziel), str(ziel)))
         except OSError as ex:
             probleme.append(f"Fehler {ziel}: {ex}")
     if echt:

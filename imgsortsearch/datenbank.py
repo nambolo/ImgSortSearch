@@ -199,6 +199,19 @@ class Datenbank:
             with self.verbindung() as v:
                 v.executemany("UPDATE bilder SET suchtext=? WHERE id=?", updates)
 
+    def zuruecksetzen(self) -> int:
+        """Alle Bilder, Gesichter und Personen löschen. Protokolle (für Rückgängig) bleiben."""
+        n = self.eins("SELECT COUNT(*) FROM bilder")[0]
+        with self.verbindung() as v:
+            for tabelle in ("gesicht_abgelehnt", "bild_zusatz", "gesichter", "personen", "bilder"):
+                v.execute(f"DELETE FROM {tabelle}")
+            v.execute("DELETE FROM meta WHERE schluessel NOT IN ('gesicht_modell', 'clip_kennung', 'suchtext_stand')")
+        with self.schreib_lock:
+            con = self._con()
+            con.commit()
+            con.execute("VACUUM")  # Platz auf der Festplatte wieder freigeben
+        return n
+
     SUCHTEXT_STAND = "2"  # erhöhen, wenn sich der Aufbau des Suchtexts ändert (2: ß-Varianten aus der Texterkennung)
 
     def suchtext_auffrischen(self) -> int:

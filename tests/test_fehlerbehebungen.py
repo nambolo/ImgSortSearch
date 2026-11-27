@@ -310,3 +310,47 @@ def test_suchtext_wird_einmal_aufgefrischt(zustand):
     assert db.suchtext_auffrischen() == db.eins("SELECT COUNT(*) AS n FROM bilder")["n"]
     assert db.eins("SELECT COUNT(*) AS n FROM bilder WHERE suchtext LIKE '%strasse%'")["n"] > 0
     assert db.suchtext_auffrischen() == 0
+
+
+def test_index_zuruecksetzen(client, zustand, heim):
+    from imgsortsearch.einstellungen import daten_ordner
+    indizieren(client)
+    db = zustand.db
+    assert db.eins("SELECT COUNT(*) AS n FROM bilder")["n"] == 5
+    assert db.eins("SELECT COUNT(*) AS n FROM gesichter")["n"] > 0
+    modelle = daten_ordner() / "modelle" / "x.onnx"
+    modelle.parent.mkdir(parents=True, exist_ok=True)
+    modelle.write_bytes(b"m")
+    with db.verbindung() as v:
+        v.execute("INSERT INTO protokolle (datei, zeit, beschreibung) VALUES ('p.jsonl', 'jetzt', 'kopieren')")
+    assert client.post("/api/index/zuruecksetzen", json={}).status_code == 400  # ohne Bestätigung nichts
+    assert db.eins("SELECT COUNT(*) AS n FROM bilder")["n"] == 5
+    r = client.post("/api/index/zuruecksetzen", json={"bestaetigt": True})
+    assert r.json() == {"entfernt": 5}
+    for t in ("bilder", "gesichter", "personen"):
+        assert db.eins(f"SELECT COUNT(*) AS n FROM {t}")["n"] == 0
+    assert not (daten_ordner() / "vorschau").exists()
+    assert modelle.exists() and db.eins("SELECT COUNT(*) AS n FROM protokolle")["n"] == 1
+    assert zustand.e["quellen"] and all(p.exists() for p in (heim / "backup").iterdir())
+    s = indizieren(client)
+    assert s["gesamt"] == 5
+
+
+def test_rueckgaengig_nach_zuruecksetzen_trifft_kein_fremdes_bild(client, zustand, heim, tmp_path):
+    """Nach dem Zurücksetzen vergibt die Datenbank Bildnummern neu. Ein altes Protokoll darf beim
+    Rückgängig nicht den Pfad eines anderen Bildes überschreiben."""
+    indizieren(client)
+    client.post("/api/sortieren/ausfuehren", json={"einstellungen": {
+        "ziel": str(tmp_path / "ziel"), "modus": "verschieben", "tags": "keine", "umbenennen": False}})
+    warte(client, "sortieren")
+    pid = client.get("/api/protokolle").json()["protokolle"][0]["id"]
+    client.post("/api/index/zuruecksetzen", json={"bestaetigt": True})
+    zustand.e.aktualisieren({"quellen": [str(heim / "backup"), str(tmp_path / "ziel")]})
+    indizieren(client)
+    vorher = {r["id"]: r["pfad"] for r in zustand.db.abfrage("SELECT id, pfad FROM bilder")}
+    client.post(f"/api/protokolle/{pid}/rueckgaengig", params={"echt": True})
+    nachher = {r["id"]: r["pfad"] for r in zustand.db.abfrage("SELECT id, pfad FROM bilder")}
+    # jede Zeile zeigt auf eine vorhandene Datei, und zwar die, die von ihrem alten Platz zurückkam
+    assert all(Path(p).exists() for p in nachher.values())
+    for i, p in nachher.items():
+        assert Path(p).name == Path(vorher[i]).name
