@@ -34,21 +34,25 @@ def hineinlegen(pfad: Path) -> None:
     if not _hat_papierkorb(pfad):
         raise OSError(f"Laufwerk ohne Papierkorb, Datei bleibt liegen: {pfad}")
     FO_DELETE, FOF_SILENT, FOF_NOCONFIRMATION, FOF_ALLOWUNDO, FOF_NOERRORUI = 3, 0x4, 0x10, 0x40, 0x400
+    # Ohne diese Kennung löscht Windows stillschweigend endgültig, wenn die Datei nicht in den Papierkorb
+    # passt oder der Papierkorb abgeschaltet ist. So fragt Windows in diesem Fall nach (Nein = bleibt liegen).
+    FOF_WANTNUKEWARNING = 0x4000
     op = SHFILEOPSTRUCTW(wFunc=FO_DELETE, pFrom=str(Path(pfad).resolve()) + "\0",
-                         fFlags=FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI)
+                         fFlags=FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING)
     erg = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
     if erg != 0 or op.fAnyOperationsAborted or Path(pfad).exists():
         raise OSError(f"Konnte nicht in den Papierkorb gelegt werden (Code {erg}): {pfad}")
 
 
 def _hat_papierkorb(pfad: Path) -> bool:
-    """Nur lokale Laufwerke haben einen Papierkorb. Auf Netzlaufwerken löscht Windows sofort."""
+    """Nur Festplatten haben einen Papierkorb. Auf Netzlaufwerken, USB-Sticks und Speicherkarten
+    löscht Windows sofort endgültig (externe USB-Festplatten melden sich als Festplatte)."""
     import ctypes
     laufwerk = os.path.splitdrive(str(Path(pfad).resolve()))[0]
     if not laufwerk or laufwerk.startswith("\\\\"):
         return False
     art = ctypes.windll.kernel32.GetDriveTypeW(laufwerk + "\\")
-    return art in (2, 3)  # Wechseldatenträger, Festplatte
+    return art == 3  # DRIVE_FIXED; 2 = Wechseldatenträger (Stick, SD-Karte) hat keinen Papierkorb
 
 
 def _ordner(laufwerk: str) -> list[Path]:
