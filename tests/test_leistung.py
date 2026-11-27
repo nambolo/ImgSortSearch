@@ -138,3 +138,65 @@ def test_gesichter_dml_faellt_spaeter_aus(monkeypatch):
     aus = g._ausfuehren("det", np.zeros((1, 3, 8, 8), np.float32))
     assert aus[0].shape == (1, 4)
     assert g.geraet_name.startswith("CPU (Grafikkarte fehlgeschlagen")
+
+
+# ------------------------------------------------------------------ DirectML-Anpassungen
+
+def test_einfache_attention_gleiches_ergebnis():
+    import pytest
+    torch = pytest.importorskip("torch")
+    open_clip = pytest.importorskip("open_clip")
+    torch.manual_seed(0)
+    m, _, _ = open_clip.create_model_and_transforms("ViT-B-32", pretrained=None)
+    m.eval()
+    with torch.no_grad():
+        for p in m.visual.parameters():
+            p.add_(torch.randn_like(p) * 0.05)
+    x = torch.rand(2, 3, 224, 224)
+    with torch.no_grad():
+        vorher = m.encode_image(x)
+    assert modelle.einfache_attention_einsetzen(m.visual) == 12
+    benutzt = []
+    alt = torch._native_multi_head_attention
+    torch._native_multi_head_attention = lambda *a, **k: benutzt.append(1) or alt(*a, **k)
+    try:
+        with torch.no_grad():
+            nachher = m.encode_image(x)
+    finally:
+        torch._native_multi_head_attention = alt
+    assert not benutzt   # der Befehl, den DirectML nicht kann, kommt nicht mehr vor
+    assert torch.allclose(vorher, nachher, atol=1e-4)
+
+
+def test_det_feste_groesse(tmp_path):
+    import pytest
+    onnx = pytest.importorskip("onnx")
+    ort = pytest.importorskip("onnxruntime")
+    from onnx import TensorProto, helper, numpy_helper
+    # Mini-Detektor wie SCRFD: Resize mit zur Laufzeit berechneter Zielgröße (doppelte Eingabegröße)
+    k = lambda name, arr: numpy_helper.from_array(np.array(arr), name)  # noqa: E731
+    knoten = [
+        helper.make_node("Shape", ["x"], ["s"]),
+        helper.make_node("Slice", ["s", "a", "b"], ["hw"]),
+        helper.make_node("Mul", ["hw", "zwei"], ["hw2"]),
+        helper.make_node("Concat", ["eins", "hw2"], ["groesse"], axis=0),
+        helper.make_node("Resize", ["x", "leer", "leer", "groesse"], ["y"], mode="nearest",
+                         coordinate_transformation_mode="asymmetric", nearest_mode="floor"),
+    ]
+    g = helper.make_graph(knoten, "mini", [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 3, "?", "?"])],
+                          [helper.make_tensor_value_info("y", TensorProto.FLOAT, None)],
+                          [k("a", np.array([2], np.int64)), k("b", np.array([4], np.int64)),
+                           k("zwei", np.array([2], np.int64)), k("eins", np.array([1, 3], np.int64)),
+                           numpy_helper.from_array(np.zeros(0, np.float32), "leer")])
+    m = helper.make_model(g, opset_imports=[helper.make_opsetid("", 11)])
+    m.ir_version = 6
+    quelle = tmp_path / "det.onnx"
+    onnx.save(m, str(quelle))
+    fest = modelle.det_feste_groesse(quelle, 8)
+    assert fest.name == "det_fest8.onnx"
+    x = np.random.default_rng(0).random((1, 3, 8, 8)).astype(np.float32)
+    a = ort.InferenceSession(str(quelle), providers=["CPUExecutionProvider"]).run(None, {"x": x})[0]
+    b_s = ort.InferenceSession(str(fest), providers=["CPUExecutionProvider"])
+    assert b_s.get_inputs()[0].shape == [1, 3, 8, 8]
+    assert np.array_equal(a, b_s.run(None, {"x": x})[0])
+    assert modelle.det_feste_groesse(quelle, 8) == fest   # zweites Mal aus dem Zwischenspeicher
