@@ -10,7 +10,6 @@ import json
 import re
 import shutil
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -133,22 +132,88 @@ def _einbetten_argumente(datei: Path, a: Auftrag, sicherung: bool) -> list[str]:
     return [" ".join(x.splitlines()) for x in args]  # eine Zeile pro Argument
 
 
-def _einbetten(datei: Path, a: Auftrag, sicherung: bool) -> None:
-    exiftool = shutil.which("exiftool")
-    if not exiftool:
-        raise RuntimeError("exiftool nicht gefunden")
-    # Argumente über eine UTF-8-Datei statt über die Kommandozeile: unter Windows kämen
-    # Umlaute in Namen (Jürgen) oder Pfaden sonst verstümmelt bei exiftool an.
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".args", delete=False) as f:
-        f.write("\n".join(_einbetten_argumente(datei, a, sicherung)) + "\n")
-        argdatei = f.name
+# Formate, in die exiftool Metadaten schreiben kann (BMP z. B. nicht: dafür XMP-Datei daneben)
+EINBETTEN_ENDUNGEN = {".jpg", ".jpeg", ".tif", ".tiff", ".png", ".heic", ".heif", ".webp", ".gif"}
+
+
+class _Exiftool:
+    """Ein dauerhaft laufendes exiftool (-stay_open) für alle Dateien eines Laufs.
+
+    Ein eigener Aufruf pro Bild kostet unter Windows fast eine Sekunde (Start des Programms);
+    bei 10.000 Bildern wären das Stunden. Die Argumente gehen als UTF-8 über stdin
+    (wie eine Argumentdatei), damit Umlaute in Namen und Pfaden heil ankommen."""
+
+    ZEITLIMIT = 120
+
+    def __init__(self):
+        self.exe = shutil.which("exiftool")
+        if not self.exe:
+            raise RuntimeError("exiftool nicht gefunden")
+        self.proc = None
+
+    def _starten(self):
+        import queue
+        import threading
+        self.proc = subprocess.Popen([self.exe, "-stay_open", "True", "-@", "-"], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=_KEIN_FENSTER)
+        self.zeilen = queue.Queue()
+        proc = self.proc
+
+        def lesen():
+            for zeile in iter(proc.stdout.readline, b""):
+                self.zeilen.put(zeile)
+            self.zeilen.put(None)  # Prozess beendet
+
+        threading.Thread(target=lesen, daemon=True).start()
+
+    def schreiben(self, args: list[str]) -> None:
+        import queue
+        if self.proc is None or self.proc.poll() is not None:
+            self._starten()
+        self.proc.stdin.write(("\n".join(args) + "\n-execute\n").encode("utf-8"))
+        self.proc.stdin.flush()
+        ausgabe = []
+        while True:
+            try:
+                zeile = self.zeilen.get(timeout=self.ZEITLIMIT)
+            except queue.Empty:
+                self.schliessen(hart=True)  # hängt an dieser Datei: beim nächsten Bild neu starten
+                raise RuntimeError("exiftool reagiert nicht") from None
+            if zeile is None:
+                self.proc = None
+                raise RuntimeError("exiftool wurde unerwartet beendet: " + " ".join(ausgabe))
+            text = zeile.decode("utf-8", "replace").strip()
+            if text == "{ready}":
+                break
+            if text:
+                ausgabe.append(text)
+        meldung = " ".join(ausgabe)
+        if "Error" in meldung or "weren't updated" in meldung or "updated" not in meldung and "unchanged" not in meldung:
+            raise RuntimeError(meldung or "exiftool: keine Rückmeldung")
+
+    def schliessen(self, hart: bool = False):
+        proc, self.proc = self.proc, None
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            if not hart:
+                proc.stdin.write(b"-stay_open\nFalse\n")
+                proc.stdin.flush()
+                proc.wait(timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        if proc.poll() is None:
+            proc.kill()
+
+
+def _einbetten(datei: Path, a: Auftrag, sicherung: bool, exiftool: _Exiftool | None = None) -> None:
+    eigenes = exiftool is None
+    exiftool = exiftool or _Exiftool()
     try:
-        proc = subprocess.run([exiftool, "-@", argdatei], capture_output=True, creationflags=_KEIN_FENSTER)
+        exiftool.schreiben(_einbetten_argumente(datei, a, sicherung))
     finally:
-        Path(argdatei).unlink(missing_ok=True)
-    if proc.returncode != 0:
-        meldung = (proc.stderr or proc.stdout).decode("utf-8", "replace").strip()
-        raise RuntimeError(meldung or f"exiftool Fehlercode {proc.returncode}")
+        if eigenes:
+            exiftool.schliessen()
 
 
 def _sidecars(pfad: Path) -> list[Path]:
@@ -185,7 +250,7 @@ def ausfuehren(auftraege: list[Auftrag], s: dict, protokoll_ordner: Path, echt: 
     belegt: set[Path] = set()
     zaehler = {"ok": 0, "duplikat": 0, "fehlt": 0, "fehler": 0, "unveraendert": 0}
     vorschau, fehler, pfad_aenderungen = [], [], []
-    prot_datei = prot = None
+    prot_datei = prot = exif = None
     if echt:
         protokoll_ordner.mkdir(parents=True, exist_ok=True)
         prot_datei = protokoll_ordner / f"protokoll-{datetime.now():%Y%m%d-%H%M%S}.jsonl"
@@ -238,8 +303,8 @@ def ausfuehren(auftraege: list[Auftrag], s: dict, protokoll_ordner: Path, echt: 
                             shutil.move(str(x), str(x_neu))
                             schreibe({"op": "verschoben", "quelle": str(x), "ziel": str(x_neu)})
                 art = tags_modus
-                if art == "einbetten" and neu.suffix.lower() in RAW_ENDUNGEN:
-                    art = "sidecar"  # RAW-Dateien nie direkt verändern
+                if art == "einbetten" and neu.suffix.lower() not in EINBETTEN_ENDUNGEN:
+                    art = "sidecar"  # RAW-Dateien nie direkt verändern; BMP u. a. kann exiftool nicht schreiben
                 if art == "sidecar":
                     xmp = neu.with_name(neu.name + ".xmp")
                     if not xmp.exists():
@@ -249,7 +314,9 @@ def ausfuehren(auftraege: list[Auftrag], s: dict, protokoll_ordner: Path, echt: 
                     sicherung = modus != "kopieren"  # Kopien dürfen direkt geändert werden
                     if sicherung and Path(str(neu) + "_original").exists():
                         raise RuntimeError("Sicherung von einem früheren Lauf vorhanden, bitte erst prüfen")
-                    _einbetten(neu, a, sicherung)
+                    if exif is None:
+                        exif = _Exiftool()
+                    _einbetten(neu, a, sicherung, exif)
                     if sicherung:
                         schreibe({"op": "eingebettet", "ziel": str(neu), "sicherung": str(neu) + "_original",
                                   "bild_id": a.bild_id})
@@ -262,6 +329,8 @@ def ausfuehren(auftraege: list[Auftrag], s: dict, protokoll_ordner: Path, echt: 
     finally:
         if prot:
             prot.close()
+        if exif is not None:
+            exif.schliessen()
     return {"zaehler": zaehler, "vorschau": vorschau, "fehler": fehler[:100],
             "protokoll": str(prot_datei) if prot_datei else None, "pfad_aenderungen": pfad_aenderungen}
 

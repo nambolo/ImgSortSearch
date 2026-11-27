@@ -319,7 +319,16 @@ class Indexer:
                                info.datum.isoformat(sep=" ") if info.datum else None, info.datum_quelle,
                                info.hersteller, info.modell, info.kamera, info.gps_lat, info.gps_lon,
                                info.breite, info.hoehe, ", ".join(info.schlagwoerter)))
+            # Suchtext (Dateiname, Ordner, Kamera) gleich anlegen: so findet die Suche neue Bilder schon
+            # während der Analyse läuft, und auch Dateien, die sich nicht analysieren lassen
+            pfade = [str(p) for p in teil]
+            self.db.suchtext_aktualisieren_viele(r["id"] for r in self.db.abfrage(
+                f"SELECT id FROM bilder WHERE pfad IN ({','.join('?' * len(pfade))})", pfade))
             self._setze(fertig=min(len(neu_oder_geaendert), i + 400))
+        # ältere Indexe: Bilder, die nie analysiert werden konnten, hatten keinen Suchtext
+        if not self._stop.is_set():
+            self.db.suchtext_aktualisieren_viele(
+                r["id"] for r in self.db.abfrage("SELECT id FROM bilder WHERE suchtext IS NULL OR suchtext=''"))
 
     # ---------------------------------------------------------- Schritt 2
 
