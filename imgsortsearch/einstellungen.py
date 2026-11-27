@@ -61,6 +61,7 @@ STANDARD = {
         "ordner": "{kategorie}/{datum:%Y}/{datum:%Y-%m}",
         "tags": "sidecar",               # sidecar | einbetten | keine
     },
+    "beschleunigung": "auto",            # auto | cuda | directml | xpu | cpu
     "port": 8765,
 }
 
@@ -88,7 +89,7 @@ class Einstellungen:
         self.werte = copy.deepcopy(STANDARD)
         if self.datei.exists():
             try:
-                self.werte = _mische(STANDARD, json.loads(self.datei.read_text("utf-8")))
+                self.werte = _mische(STANDARD, json.loads(self.datei.read_text("utf-8-sig")))
             except json.JSONDecodeError:
                 pass
 

@@ -73,3 +73,38 @@ def test_xmp_gueltig():
     import xml.dom.minidom
     a = sortieren.Auftrag(Path("a.jpg"), "Arbeit", None, "", ["A&B"], ["Anna <Test>"], "Ein \"Bild\"")
     xml.dom.minidom.parseString(sortieren.xmp_sidecar(a).encode())
+
+
+def test_rueckfall_auf_cpu():
+    from imgsortsearch.modelle import _GeraetMitRueckfall
+
+    class Modell:
+        def __init__(self):
+            self.ort = "gpu"
+
+        def to(self, ort):
+            self.ort = ort
+            return self
+
+    class Test(_GeraetMitRueckfall):
+        _modelle = ("model",)
+
+        def __init__(self):
+            self.model, self.geraet, self.geraet_name = Modell(), "gpu", "Testkarte"
+
+        def rechne(self):
+            def f():
+                if self.model.ort != "cpu":
+                    raise RuntimeError("Operation nicht unterstützt")
+                return 42
+            return self._mit_rueckfall(f)
+
+    t = Test()
+    assert t.rechne() == 42
+    assert t.geraet == "cpu" and t.model.ort == "cpu" and "fehlgeschlagen" in t.geraet_name
+
+
+def test_waehle_geraet_cpu():
+    pytest.importorskip("torch")
+    from imgsortsearch.modelle import waehle_geraet
+    assert waehle_geraet("cpu")[0] == "cpu"

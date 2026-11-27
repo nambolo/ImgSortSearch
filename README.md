@@ -16,10 +16,25 @@ Lokales Programm für Windows, das ein großes Foto-Backup durchsuchbar macht un
 2. **`install.bat`** doppelklicken.
    Das Skript installiert Python, alle Pakete, exiftool und die KI-Modelle **ausschließlich in diesen Ordner**
    (Unterordner `umgebung` und `daten`). Es wird nichts systemweit installiert und nichts in die Registry geschrieben.
-   Mit NVIDIA-Grafikkarte wird automatisch die beschleunigte Version installiert (`install.bat -NurCpu` verhindert das).
+   Die Grafikkarte wird erkannt und genutzt (siehe unten).
 3. **`start.bat`** doppelklicken. Das Programm öffnet sich in einem eigenen Fenster.
 
 Deinstallieren: den Ordner löschen.
+
+## Grafikkarte
+
+| Grafik | Beschleunigung |
+|---|---|
+| NVIDIA | CUDA |
+| AMD Radeon (z. B. RX 5600 XT) | DirectML |
+| Intel-Grafik im Laptop (Iris Xe, UHD, Arc) | DirectML, nutzt den gemeinsamen Arbeitsspeicher |
+| keine passende | Prozessor |
+
+`install.bat` erkennt die Grafik selbst. Erzwingen lässt sich das mit `install.bat -Beschleunigung directml`
+(oder `nvidia`, `cpu`). In den Einstellungen kann man jederzeit auf „Nur Prozessor“ umstellen. Kann die
+Grafikkarte einen Rechenschritt nicht, wechselt das Programm von selbst auf den Prozessor und zeigt das an.
+Bildmodell, Beschreibungen und Übersetzung laufen auf der Grafikkarte; Gesichter und Texterkennung auf dem
+Prozessor (die sind auch so schnell).
 
 ## Erste Schritte
 
@@ -45,7 +60,7 @@ Grobe Werte für 10.000 Bilder auf einem normalen PC ohne Grafikkarte:
 | Texterkennung (nur Bilder mit Text) | je nach Anteil |
 | Bildbeschreibungen | mehrere Stunden (in den Einstellungen abschaltbar) |
 
-Mit NVIDIA-Grafikkarte geht es deutlich schneller. Der Lauf kann jederzeit angehalten und später fortgesetzt werden.
+Mit Grafikkarte geht es deutlich schneller. Der Lauf kann jederzeit angehalten und später fortgesetzt werden.
 
 ## Verwendete Modelle
 

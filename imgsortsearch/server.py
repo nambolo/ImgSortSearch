@@ -65,7 +65,7 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
         zahlen = {r["k"]: r["n"] for r in z.db.abfrage(f"SELECT {KAT} AS k, COUNT(*) AS n FROM bilder GROUP BY k")}
         offen = z.db.eins("SELECT COUNT(*) AS n FROM bilder WHERE schritt_clip=0 AND fehler IS NULL")["n"]
         return {"index": z.indexer.status, "kategorien": zahlen, "gesamt": sum(zahlen.values()),
-                "offen": offen, "modell_fehler": z.m.fehler, "exiftool": shutil.which("exiftool") is not None,
+                "offen": offen, "modell_fehler": z.m.fehler, "geraete": z.m.geraete(), "exiftool": shutil.which("exiftool") is not None,
                 "sortieren": z.sortier_status}
 
     @app.get("/api/einstellungen")
@@ -74,7 +74,10 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
 
     @app.post("/api/einstellungen")
     def einstellungen_schreiben(neu: dict = Body(...)):
+        alt_beschl = z.e.get("beschleunigung")
         werte = z.e.aktualisieren(neu)
+        if werte.get("beschleunigung") != alt_beschl and not z.indexer.status["laeuft"]:
+            z.m.entladen()  # beim nächsten Gebrauch auf dem neuen Gerät laden
         if any(k in neu for k in ("kategorien", "arbeitszeit", "inhalt", "schwelle", "regeln", "themen")):
             threading.Thread(target=_einordnen, daemon=True).start()
         return werte

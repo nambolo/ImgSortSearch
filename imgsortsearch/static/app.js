@@ -105,6 +105,7 @@ function statusText(s) {
     `Bilder im Index: <b>${s.gesamt.toLocaleString("de")}</b>`,
     `Noch zu analysieren: <b>${s.offen.toLocaleString("de")}</b>`,
     `exiftool: ${s.exiftool ? "gefunden" : "nicht gefunden (Lesen über Pillow, Einbetten nicht möglich)"}`,
+    `Rechnet auf: ${esc(Object.values(s.geraete || {})[0] || "wird beim ersten Indexlauf ermittelt")}`,
     ...f.map(([n, t]) => `<span style="color:var(--schlecht)">Modell ${esc(n)} nicht verfügbar: ${esc(t)}</span>`),
     ...(s.index.fehler || []).slice(-5).map((t) => `<span style="color:var(--warn)">${esc(t)}</span>`),
   ].join("<br>");
@@ -571,6 +572,7 @@ function ladeEinstellungen() {
   $("#e-beschreibung").checked = e.beschreibung.aktiv;
   $("#e-gesichter").checked = e.gesichter.aktiv;
   $("#e-ocr").value = e.ocr.modus;
+  $("#e-beschl").value = e.beschleunigung || "auto";
   $("#e-schwelle").value = e.schwelle;
   $("#e-schwelle-wert").textContent = e.schwelle;
 }
@@ -598,6 +600,7 @@ $("#e-speichern").onclick = async () => {
     beschreibung: { aktiv: $("#e-beschreibung").checked },
     gesichter: { aktiv: $("#e-gesichter").checked },
     ocr: { modus: $("#e-ocr").value },
+    beschleunigung: $("#e-beschl").value,
     schwelle: +$("#e-schwelle").value,
   };
   try {

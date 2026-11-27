@@ -63,7 +63,8 @@ class Modelle:
 
     def clip(self):
         c = self.e["clip"]
-        return self._laden("clip", lambda: modelle.ClipModell(c["modell"], c["pretrained"]))
+        return self._laden("clip", lambda: modelle.ClipModell(c["modell"], c["pretrained"],
+                                                               self.e.get("beschleunigung", "auto")))
 
     def gesichter(self):
         return self._laden("gesichter", lambda: modelle.GesichtsModell(self.e["gesichter"]["min_groesse"]))
@@ -74,7 +75,23 @@ class Modelle:
 
     def beschreiber(self):
         b = self.e["beschreibung"]
-        return self._laden("beschreiber", lambda: modelle.Beschreiber(b["modell"], b.get("uebersetzer", "")))
+        return self._laden("beschreiber", lambda: modelle.Beschreiber(b["modell"], b.get("uebersetzer", ""),
+                                                                       self.e.get("beschleunigung", "auto")))
+
+    def geraete(self) -> dict:
+        """Welche Modelle gerade auf welchem Gerät laufen."""
+        erg = {}
+        for name in ("clip", "beschreiber"):
+            m = getattr(self, f"_{name}")
+            if m is not None and hasattr(m, "geraet_name"):
+                erg[name] = m.geraet_name
+        return erg
+
+    def entladen(self) -> None:
+        with self._lock:
+            self._clip = self._beschreiber = None
+            self.fehler.pop("clip", None)
+            self.fehler.pop("beschreiber", None)
 
     def clip_kennung(self) -> str:
         c = self.e["clip"]

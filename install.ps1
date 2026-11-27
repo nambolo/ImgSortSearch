@@ -3,9 +3,13 @@
 # in den Ordner, in dem dieses Skript liegt. Nichts wird systemweit installiert.
 # Deinstallieren = Ordner loeschen.
 param(
-    [switch]$NurCpu,          # keine Grafikkarten-Beschleunigung installieren
+    # auto: Grafikkarte erkennen. nvidia: CUDA. directml: AMD Radeon / Intel-Grafik. cpu: ohne Grafikkarte.
+    [ValidateSet("auto", "nvidia", "directml", "cpu")]
+    [string]$Beschleunigung = "auto",
+    [switch]$NurCpu,          # wie -Beschleunigung cpu
     [switch]$OhneModelle      # Modelle erst beim ersten Start laden
 )
+if ($NurCpu) { $Beschleunigung = "cpu" }
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"   # macht Invoke-WebRequest deutlich schneller
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -53,22 +57,42 @@ Schritt "2/6  Python 3.12 in den Ordner installieren"
 & $uv python install 3.12
 if (-not (Test-Path $Py)) { & $uv venv $Venv --python 3.12 }
 
-Schritt "3/6  PyTorch installieren"
-$gpu = $false
-if (-not $NurCpu) {
-    try { $null = & nvidia-smi -L 2>$null; if ($LASTEXITCODE -eq 0) { $gpu = $true } } catch { }
+Schritt "3/6  Grafikkarte erkennen und PyTorch installieren"
+$karten = @()
+try { $karten = @(Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }) } catch { }
+if ($karten.Count) { Write-Host ("Gefundene Grafik: " + ($karten -join ", ")) }
+if ($Beschleunigung -eq "auto") {
+    if ($karten -match "NVIDIA") { $Beschleunigung = "nvidia" }
+    elseif ($karten -match "AMD|Radeon|Intel|Arc|Iris|UHD") { $Beschleunigung = "directml" }
+    else { $Beschleunigung = "cpu" }
 }
-if ($gpu) {
-    Write-Host "NVIDIA-Grafikkarte gefunden: installiere die beschleunigte Version (grosser Download, ca. 2,5 GB)."
-    & $uv pip install --python $Py torch torchvision --index-url https://download.pytorch.org/whl/cu126
-} else {
-    Write-Host "Installiere die CPU-Version."
-    & $uv pip install --python $Py torch torchvision --index-url https://download.pytorch.org/whl/cpu
+$constraints = Join-Path $Umg "constraints.txt"
+switch ($Beschleunigung) {
+    "nvidia" {
+        Write-Host "NVIDIA: installiere PyTorch mit CUDA (grosser Download, ca. 2,5 GB)."
+        & $uv pip install --python $Py torch torchvision --index-url https://download.pytorch.org/whl/cu126
+    }
+    "directml" {
+        Write-Host "AMD/Intel: installiere PyTorch mit DirectML (nutzt bei Laptops auch den gemeinsamen Grafikspeicher)."
+        # torch-directml braucht genau torch 2.4.1; dazu passende Versionen der anderen Pakete
+        & $uv pip install --python $Py torch-directml
+    }
+    default {
+        Write-Host "Installiere die CPU-Version."
+        & $uv pip install --python $Py torch torchvision --index-url https://download.pytorch.org/whl/cpu
+    }
 }
 if ($LASTEXITCODE -ne 0) { throw "PyTorch-Installation fehlgeschlagen" }
+# Die installierte torch-Version festhalten, damit spaetere Pakete sie nicht austauschen
+$tv = (& $Py -c "import torch, torchvision; print(torch.__version__.split('+')[0], torchvision.__version__.split('+')[0])").Trim().Split(" ")
+$zeilen = @("torch==$($tv[0])", "torchvision==$($tv[1])")
+if ($Beschleunigung -eq "directml") { $zeilen += @("open_clip_torch<4", "transformers<4.50") }
+Set-Content -Path $constraints -Value $zeilen -Encoding ASCII
 
 Schritt "4/6  Programmpakete installieren"
-& $uv pip install --python $Py -r (Join-Path $Root "requirements.txt")
+$torchIndex = @()
+if ($Beschleunigung -eq "nvidia") { $torchIndex = @("--extra-index-url", "https://download.pytorch.org/whl/cu126", "--index-strategy", "unsafe-best-match") }
+& $uv pip install --python $Py -r (Join-Path $Root "requirements.txt") -c $constraints @torchIndex
 if ($LASTEXITCODE -ne 0) { throw "Paketinstallation fehlgeschlagen" }
 
 Schritt "5/6  exiftool laden"
@@ -91,6 +115,12 @@ if (-not (Test-Path (Join-Path $exDir "exiftool.exe"))) {
     }
 }
 
+# Gewaehlte Beschleunigung als Voreinstellung merken (in der Oberflaeche aenderbar)
+$einst = Join-Path $Daten "einstellungen.json"
+if (-not (Test-Path $einst)) {
+    Set-Content -Path $einst -Value ('{"beschleunigung": "' + $(if ($Beschleunigung -eq "cpu") { "cpu" } else { "auto" }) + '"}') -Encoding ASCII
+}
+
 Schritt "6/6  KI-Modelle laden (einmalig, einige GB)"
 if ($OhneModelle) {
     Write-Host "Uebersprungen. Die Modelle werden beim ersten Indexlauf geladen."
@@ -104,4 +134,5 @@ if ($OhneModelle) {
 }
 
 Write-Host ""
+Write-Host "Beschleunigung: $Beschleunigung" -ForegroundColor Green
 Write-Host "Fertig! Starten mit  start.bat  (Doppelklick)." -ForegroundColor Green

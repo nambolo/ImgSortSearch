@@ -92,6 +92,59 @@ def bild_laden(pfad: Path, max_kante: int | None = None) -> Image.Image:
     return img
 
 
+# ------------------------------------------------------------------ Grafikkarte
+
+def waehle_geraet(wunsch: str = "auto"):
+    """Liefert (torch-Gerät, Beschreibung).
+
+    auto: NVIDIA (CUDA) > Intel (XPU) > DirectML (AMD/Intel/alle DirectX-12-Grafikkarten unter Windows) > CPU.
+    DirectML nutzt bei Intel-Grafik im Laptop automatisch den gemeinsamen Arbeitsspeicher."""
+    import torch
+    wunsch = (wunsch or "auto").lower()
+    if wunsch in ("auto", "cuda") and torch.cuda.is_available():
+        return "cuda", f"NVIDIA CUDA ({torch.cuda.get_device_name(0)})"
+    if wunsch in ("auto", "xpu") and hasattr(torch, "xpu") and torch.xpu.is_available():
+        return "xpu", f"Intel XPU ({torch.xpu.get_device_name(0)})"
+    if wunsch in ("auto", "directml"):
+        try:
+            import torch_directml
+            if torch_directml.is_available():
+                return torch_directml.device(), f"DirectML ({torch_directml.device_name(torch_directml.default_device())})"
+        except Exception as e:  # Paket fehlt oder Treiber zu alt
+            if wunsch == "directml":
+                log.warning("DirectML nicht verfügbar: %s", e)
+    return "cpu", "CPU (Prozessor)"
+
+
+class _GeraetMitRueckfall:
+    """Führt Berechnungen auf der Grafikkarte aus und weicht bei Fehlern einmalig auf die CPU aus.
+
+    Manche Grafiktreiber oder DirectML können einzelne Operationen nicht. Dann
+    läuft der Rest des Laufs eben auf dem Prozessor statt abzubrechen."""
+
+    geraet = "cpu"
+    geraet_name = "CPU (Prozessor)"
+    _modelle: tuple = ()
+
+    def _auf_cpu(self, fehler: Exception):
+        log.warning("Grafikkarte (%s) fehlgeschlagen, weiter auf der CPU: %s", self.geraet_name, fehler)
+        for name in self._modelle:
+            m = getattr(self, name, None)
+            if m is not None:
+                setattr(self, name, m.to("cpu"))
+        self.geraet = "cpu"
+        self.geraet_name = f"CPU (Grafikkarte fehlgeschlagen: {str(fehler)[:120]})"
+
+    def _mit_rueckfall(self, funktion):
+        try:
+            return funktion()
+        except (RuntimeError, NotImplementedError) as e:
+            if str(self.geraet) == "cpu":
+                raise
+            self._auf_cpu(e)
+            return funktion()
+
+
 # ------------------------------------------------------------------ CLIP
 
 PROMPTS_TEXT = [
@@ -104,23 +157,32 @@ PROMPTS_KEIN_TEXT = [
 ]
 
 
-class ClipModell:
+class ClipModell(_GeraetMitRueckfall):
     """Mehrsprachiges CLIP (versteht deutsche Suchbegriffe)."""
 
-    def __init__(self, modell: str, pretrained: str):
+    _modelle = ("model",)
+
+    def __init__(self, modell: str, pretrained: str, beschleunigung: str = "auto"):
         import open_clip
         import torch
         self.torch = torch
         torch.set_num_threads(max(1, (os.cpu_count() or 2) - 1))
-        self.geraet = "cuda" if torch.cuda.is_available() else "cpu"
+        self.geraet, self.geraet_name = waehle_geraet(beschleunigung)
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
-            modell, pretrained=pretrained, cache_dir=str(modell_ordner() / "clip"), device=self.geraet)
+            modell, pretrained=pretrained, cache_dir=str(modell_ordner() / "clip"))
         self.model.eval()
+        try:
+            self.model = self.model.to(self.geraet)
+        except Exception as e:
+            self._auf_cpu(e)
         self.tokenizer = open_clip.get_tokenizer(modell, cache_dir=str(modell_ordner() / "clip"))
         self._text_cache: dict[str, np.ndarray] = {}
         self.kennung = f"{modell}/{pretrained}"
 
     def bilder(self, bilder: list[Image.Image]) -> np.ndarray:
+        return self._mit_rueckfall(lambda: self._bilder(bilder))
+
+    def _bilder(self, bilder):
         torch = self.torch
         with torch.no_grad():
             x = torch.stack([self.preprocess(b) for b in bilder]).to(self.geraet)
@@ -131,13 +193,16 @@ class ClipModell:
     def texte(self, texte: list[str]) -> np.ndarray:
         fehlend = [t for t in texte if t not in self._text_cache]
         if fehlend:
-            torch = self.torch
-            with torch.no_grad():
-                f = self.model.encode_text(self.tokenizer(fehlend).to(self.geraet)).float()
-                f = f / f.norm(dim=-1, keepdim=True)
-            for t, v in zip(fehlend, f.cpu().numpy()):
+            for t, v in zip(fehlend, self._mit_rueckfall(lambda: self._texte(fehlend))):
                 self._text_cache[t] = v
         return np.stack([self._text_cache[t] for t in texte])
+
+    def _texte(self, texte):
+        torch = self.torch
+        with torch.no_grad():
+            f = self.model.encode_text(self.tokenizer(texte).to(self.geraet)).float()
+            f = f / f.norm(dim=-1, keepdim=True)
+        return f.cpu().numpy()
 
 
 def softmax(x: np.ndarray, temperatur: float = 100.0) -> np.ndarray:
@@ -233,25 +298,36 @@ class OCR:
 
 # ------------------------------------------------------------------ Bildbeschreibung
 
-class Beschreiber:
+class Beschreiber(_GeraetMitRueckfall):
     """Erzeugt kurze Bildbeschreibungen (BLIP, englisch) und übersetzt sie ins Deutsche (Marian)."""
 
-    def __init__(self, modell: str, uebersetzer: str = ""):
+    _modelle = ("model", "ue_model")
+
+    def __init__(self, modell: str, uebersetzer: str = "", beschleunigung: str = "auto"):
         import torch
         from transformers import BlipForConditionalGeneration, BlipProcessor
         self.torch = torch
-        self.geraet = "cuda" if torch.cuda.is_available() else "cpu"
+        self.geraet, self.geraet_name = waehle_geraet(beschleunigung)
         cache = str(modell_ordner() / "hf")
         self.proc = BlipProcessor.from_pretrained(modell, cache_dir=cache)
-        self.model = BlipForConditionalGeneration.from_pretrained(modell, cache_dir=cache).to(self.geraet).eval()
+        self.model = BlipForConditionalGeneration.from_pretrained(modell, cache_dir=cache).eval()
         self.ue_tok = self.ue_model = None
         if uebersetzer:
             from transformers import MarianMTModel, MarianTokenizer
             self.ue_tok = MarianTokenizer.from_pretrained(uebersetzer, cache_dir=cache)
-            self.ue_model = MarianMTModel.from_pretrained(uebersetzer, cache_dir=cache).to(self.geraet).eval()
+            self.ue_model = MarianMTModel.from_pretrained(uebersetzer, cache_dir=cache).eval()
+        try:
+            self.model = self.model.to(self.geraet)
+            if self.ue_model is not None:
+                self.ue_model = self.ue_model.to(self.geraet)
+        except Exception as e:
+            self._auf_cpu(e)
 
     def beschreiben(self, bilder: list[Image.Image]) -> list[tuple[str, str]]:
         """Liste von (deutsch, englisch)."""
+        return self._mit_rueckfall(lambda: self._beschreiben(bilder))
+
+    def _beschreiben(self, bilder):
         torch = self.torch
         with torch.no_grad():
             x = self.proc(images=bilder, return_tensors="pt").to(self.geraet)

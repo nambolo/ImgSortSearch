@@ -185,6 +185,14 @@
           <div class="feld"><label>Texterkennung (OCR)</label>
             <select id="e-ocr"><option value="text_bilder">Nur Bilder mit Text (Screenshots, Dokumente …)</option>
               <option value="alle">Alle Bilder (langsam)</option><option value="aus">Aus</option></select></div>
+          <div class="feld"><label>Grafikkarte</label>
+            <select id="e-beschl">
+              <option value="auto">Automatisch (empfohlen)</option>
+              <option value="cuda">NVIDIA (CUDA)</option>
+              <option value="directml">AMD Radeon / Intel-Grafik (DirectML)</option>
+              <option value="xpu">Intel Arc (XPU)</option>
+              <option value="cpu">Nur Prozessor</option>
+            </select><small>Bei Problemen mit der Grafikkarte wechselt das Programm von selbst auf den Prozessor.</small></div>
           <div class="feld"><label>Wie sicher muss die Einordnung sein? <span id="e-schwelle-wert"></span></label>
             <input type="range" id="e-schwelle" min="0.5" max="4" step="0.25"><small>Höher = mehr Bilder landen in „Unklar“ und werden nicht falsch einsortiert.</small></div>
           <h2 class="abstand">Status</h2>
