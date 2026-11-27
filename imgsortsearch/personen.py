@@ -620,6 +620,34 @@ def zuweisen(db: Datenbank, gesicht_ids: list[int], person_id: int | None = None
 
 # ------------------------------------------------------------------ Suche
 
+def namen_treffer(db: Datenbank, anfrage: str) -> tuple[list[int], str, bool]:
+    """Personen, deren Name in der Suchanfrage steckt, und der Rest der Anfrage.
+
+    Groß-/Kleinschreibung und Umlaute egal ("Jürgen" = "jurgen"), Wortanfänge ab 3 Buchstaben
+    reichen ("Marl" findet Marlena). Liefert (person_ids, übrige Wörter, alle Wörter exakt ein Name)."""
+    from .datenbank import normalisiere
+    woerter = normalisiere(anfrage).split()
+    if not woerter:
+        return [], "", False
+    treffer, verbraucht, exakt = [], set(), set()
+    for z in db.abfrage("SELECT id, name FROM personen WHERE name IS NOT NULL"):
+        name = normalisiere(z["name"]).split()
+        if not name:
+            continue
+        passend = {i for i, w in enumerate(woerter)
+                   if any(n == w or (len(w) >= 3 and n.startswith(w)) for n in name)}
+        if passend:
+            treffer.append(z["id"])
+            verbraucht |= passend
+            exakt |= {i for i, w in enumerate(woerter) if w in name}
+    rest = " ".join(w for i, w in enumerate(woerter) if i not in verbraucht)
+    return treffer, rest, len(exakt) == len(woerter)
+
+
+def bilder_mit_personen(db: Datenbank, person_ids: list[int]) -> list[int]:
+    return _bilder_von(db, person_ids) if person_ids else []
+
+
 def aehnliche_gesichter(db: Datenbank, referenz: np.ndarray, schwelle: float = SUCH_SCHWELLE,
                         limit: int = 2000) -> list[tuple[int, float]]:
     """Bilder (bild_id, Ähnlichkeit), auf denen ein Gesicht der Referenz ähnelt. Beste zuerst."""
