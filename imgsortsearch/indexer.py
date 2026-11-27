@@ -20,7 +20,7 @@ import numpy as np
 from . import metadata, modelle
 from .datenbank import Datenbank, normalisiere, vektor_zu_blob
 from .einstellungen import Einstellungen, daten_ordner
-from .klassifizierung import Themen, einordnen, thema_prompt
+from .klassifizierung import Themen, einordnen, thema_prompt, zusatz_kategorien
 
 log = logging.getLogger(__name__)
 
@@ -194,7 +194,10 @@ def alle_neu_einordnen(db: Datenbank, e: Einstellungen, modelle_: Modelle) -> in
         log.warning("Bildvektoren passen nicht zum Bildmodell, Inhalt wird beim Einordnen ignoriert")
         themen = None
     zeilen = db.abfrage("SELECT id, pfad, datum, datum_quelle, hersteller, modell, gps_lat, gps_lon, "
-                        "anzahl_gesichter, suchtext, tags FROM bilder")
+                        "anzahl_gesichter, suchtext, tags, zusatz_auto FROM bilder")
+    zusatz = zusatz_kategorien(e.werte)
+    # Themen, die auf eine Zusatzkategorie zeigen, vergeben sie automatisch (zusätzlich zur Hauptkategorie)
+    thema_zusatz = {t["name"]: t["kategorie"] for t in e["themen"] if t.get("kategorie") in zusatz}
     auswertung = {}
     if themen is not None and len(ids):
         for i, a in zip(ids, themen.auswerten(mat)):
@@ -205,12 +208,16 @@ def alle_neu_einordnen(db: Datenbank, e: Einstellungen, modelle_: Modelle) -> in
         inh = auswertung.get(d["id"])
         erg = einordnen(d, inh, e.werte)
         tags = ", ".join(inh["tags"]) if inh else d.get("tags") or ""
-        updates.append((erg["kategorie"], erg["sicherheit"], erg["gruende"], tags, d["id"]))
+        z_auto = ",".join(dict.fromkeys(thema_zusatz[t] for t in inh["tags"] if t in thema_zusatz)) if inh \
+            else d.get("zusatz_auto") or ""
+        updates.append((erg["kategorie"], erg["sicherheit"], erg["gruende"], tags, z_auto, d["id"]))
         if tags != (d.get("tags") or ""):
             tags_neu.append(d["id"])
     with db.verbindung() as v:
-        v.executemany("UPDATE bilder SET kategorie_auto=?, sicherheit=?, gruende=?, tags=? WHERE id=?", updates)
+        v.executemany("UPDATE bilder SET kategorie_auto=?, sicherheit=?, gruende=?, tags=?, zusatz_auto=? "
+                      "WHERE id=?", updates)
     db.suchtext_aktualisieren_viele(tags_neu)  # nur wo sich die Schlagwörter geändert haben
+    db.zusatz_aktualisieren(zusatz)
     return len(updates)
 
 

@@ -19,6 +19,16 @@ from .modelle import softmax
 
 UNKLAR = "Unklar"
 
+
+def haupt_kategorien(e: dict) -> list[str]:
+    """Kategorien, von denen jedes Bild genau eine bekommt (z. B. Arbeit, Privat). Sie bestimmen den Zielordner."""
+    return [k["name"] for k in e.get("kategorien", []) if not k.get("zusatz")]
+
+
+def zusatz_kategorien(e: dict) -> list[str]:
+    """Kategorien, die ein Bild zusätzlich haben kann, beliebig viele (z. B. Natur, Familie)."""
+    return [k["name"] for k in e.get("kategorien", []) if k.get("zusatz")]
+
 def thema_prompt(t: dict) -> str:
     return f"ein Foto: {t.get('prompt') or t['name']}"
 
@@ -143,7 +153,8 @@ def einordnen(z: dict, inhalt: dict | None, e: dict) -> dict:
     """Bewertet ein Bild und wählt die Kategorie mit den meisten Punkten.
 
     ``z``: Bildzeile, ``inhalt``: Ergebnis von ``Themen.auswerten``, ``e``: Einstellungen."""
-    namen = [k["name"] for k in e.get("kategorien", [])]
+    # Zusatzkategorien (z. B. Natur) schließen andere nicht aus und laufen nicht in diesen Wettbewerb
+    namen = [k["name"] for k in e.get("kategorien", []) if not k.get("zusatz")]
     punkte = {k: 0.0 for k in namen}
     gruende = []
 

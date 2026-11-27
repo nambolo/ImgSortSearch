@@ -217,3 +217,15 @@ main { min-width: 0; min-height: 0; position: relative; }
 .quelle.fehlt span { color: var(--schlecht); }
 .quelle.fehlt small { color: var(--schlecht); margin-left: 8px; white-space: nowrap; }
 #index-knopf:disabled { opacity: .7; cursor: progress; }
+
+/* Zusatzkategorien */
+.kat-knopf.zusatz { border-style: dashed; }
+.kat-knopf.zusatz.aktiv { border-style: solid; }
+.kat-knopf.zusatz.teils { background: color-mix(in srgb, var(--flaeche2) 70%, #ffffff 8%); }
+.kat-art { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text3); cursor: pointer; white-space: nowrap; }
+.kat-eintrag.zusatz { border-style: dashed; }
+.marke .zusatz-punkt { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-left: 4px; vertical-align: middle; }
+.auswahl-leiste #auswahl-zusatz { padding-left: 8px; border-left: 1px solid var(--linie); }
+.auswahl-leiste { max-width: calc(100% - 32px); flex-wrap: wrap; justify-content: center; }
+.auswahl-leiste #auswahl-zahl { white-space: nowrap; }
+.auswahl-leiste .kat-knopf, .auswahl-leiste .knopf { white-space: nowrap; }
