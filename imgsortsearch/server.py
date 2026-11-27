@@ -580,7 +580,13 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
 
     @app.get("/api/personen/vorschlaege")
     def personen_vorschlaege():
-        return {"vorschlaege": personen.vorschlaege(z.db, z.e.werte)}
+        return personen.vorschlaege(z.db, z.e.werte)
+
+    @app.post("/api/personen/vorschlag")
+    def personen_vorschlag_anwenden(daten: dict = Body(...)):
+        ziel = personen.vorschlag_anwenden(z.db, int(daten["ziel"]), [int(i) for i in daten.get("ja", [])],
+                                           [int(i) for i in daten.get("nein", [])])
+        return {"ziel": ziel}
 
     @app.post("/api/personen/verschieden")
     def personen_verschieden(daten: dict = Body(...)):
@@ -595,6 +601,11 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
     @app.get("/api/personen/{person_id}/gesichter")
     def person_gesichter(person_id: int):
         return {"gesichter": personen.person_gesichter(z.db, person_id)}
+
+    @app.get("/api/personen/{person_id}/typisch")
+    def person_typisch(person_id: int, anzahl: int = 8):
+        """Typische Gesichter einer Person (zum Vergleichen)."""
+        return {"gesichter": personen._vertreter(z.db, person_id, max(1, min(anzahl, 24)))}
 
     def _gesicht_ids(daten: dict) -> list[int]:
         ids = [int(i) for i in daten.get("gesichter", [])]

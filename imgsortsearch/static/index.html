@@ -133,7 +133,14 @@
       </div>
       <div class="karte hinweis-karte" id="personen-hinweis" hidden></div>
       <div class="karte" id="personen-vorschlaege" hidden>
-        <div class="zeile zwischen"><div><strong>Ist das dieselbe Person?</strong><br><span class="hinweis">Diese Gruppen sehen sich sehr ähnlich. Ein Klick genügt.</span></div><span class="hinweis" id="pv-anzahl"></span></div>
+        <div class="zeile zwischen">
+          <div><strong>Gehören diese Gruppen dazu?</strong><br><span class="hinweis">Häkchen = dieselbe Person. Häkchen weg = andere Person, wird nicht wieder gefragt. Klick auf ein Gesicht zeigt oben typische Fotos beider Gruppen zum Vergleich.</span></div>
+          <div class="zeile"><span class="hinweis" id="pv-anzahl"></span><button class="knopf leicht" id="pv-spaeter" title="Vorschläge bis zum nächsten Start ausblenden">Später</button></div>
+        </div>
+        <div class="pv-vergleich" id="pv-vergleich">
+          <div class="pv-reihe"><span class="hinweis" id="pv-v-a"></span><div class="pv-gesichter" id="pv-v-a-bilder"></div></div>
+          <div class="pv-reihe"><span class="hinweis" id="pv-v-b"></span><div class="pv-gesichter" id="pv-v-b-bilder"></div></div>
+        </div>
         <div class="vorschlag-liste" id="pv-liste"></div>
       </div>
       <div class="karte" id="person-detail" hidden>
