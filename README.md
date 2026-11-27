@@ -19,6 +19,12 @@ Lokales Programm für Windows, das ein großes Foto-Backup durchsuchbar macht un
    Die Grafikkarte wird erkannt und genutzt (siehe unten).
 3. **`start.bat`** doppelklicken. Das Programm öffnet sich in einem eigenen Fenster.
 
+Aktualisieren: **`update.bat`** doppelklicken. Holt den neuesten Stand von GitHub (wie `git pull`; ohne installiertes git
+wird ein portables git nach `umgebung\git` geladen) und zieht neue Pakete nach. `umgebung` und `daten`
+(Index, Einstellungen, Modelle) bleiben erhalten. Funktioniert auch mit einem Ordner aus dem ZIP-Download.
+
+Hat exiftool bei der Installation nicht geklappt: **`exiftool-nachladen.bat`** doppelklicken. Das lädt nur exiftool, alles andere bleibt.
+
 Deinstallieren: den Ordner löschen.
 
 ## Grafikkarte

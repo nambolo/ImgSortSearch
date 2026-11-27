@@ -7,7 +7,8 @@ param(
     [ValidateSet("auto", "nvidia", "directml", "cpu")]
     [string]$Beschleunigung = "auto",
     [switch]$NurCpu,          # wie -Beschleunigung cpu
-    [switch]$OhneModelle      # Modelle erst beim ersten Start laden
+    [switch]$OhneModelle,     # Modelle erst beim ersten Start laden
+    [switch]$NurExiftool      # nur exiftool (neu) laden, alles andere bleibt, wie es ist
 )
 if ($NurCpu) { $Beschleunigung = "cpu" }
 $ErrorActionPreference = "Stop"
@@ -36,16 +37,76 @@ $env:PIP_CACHE_DIR          = Join-Path $Umg "cache\pip"
 $env:PYTHONNOUSERSITE       = "1"
 
 function Schritt($text) { Write-Host ""; Write-Host "==> $text" -ForegroundColor Cyan }
+# Eigene Kennung: SourceForge liefert "Browsern" (alles mit "Mozilla", auch der PowerShell-Standard)
+# eine Warteseite statt der Datei
+$UA = "ImgSortSearch-Installer/1.0"
 function Laden($url, $ziel) {
     for ($i = 1; $i -le 3; $i++) {
-        try { Invoke-WebRequest -Uri $url -OutFile $ziel -UseBasicParsing; return }
+        try { Invoke-WebRequest -Uri $url -OutFile $ziel -UseBasicParsing -UserAgent $UA; return }
         catch { if ($i -eq 3) { throw }; Start-Sleep -Seconds (3 * $i) }
     }
+}
+function IstZip($datei) {
+    if (-not (Test-Path $datei) -or (Get-Item $datei).Length -lt 1000) { return $false }
+    $fs = [IO.File]::OpenRead($datei)
+    try { return ($fs.ReadByte() -eq 0x50 -and $fs.ReadByte() -eq 0x4B) } finally { $fs.Close() }
+}
+function ExiftoolLaden($exDir) {
+    # exiftool.org hat nur die neueste Version; SourceForge ist der offizielle Spiegel (mit allen Versionen)
+    $quellen = @(
+        @{ ver = "https://exiftool.org/ver.txt"; zip = "https://exiftool.org/exiftool-{0}_64.zip" },
+        @{ ver = "https://downloads.sourceforge.net/project/exiftool/ver.txt"; zip = "https://downloads.sourceforge.net/project/exiftool/exiftool-{0}_64.zip" }
+    )
+    $zip = Join-Path $Umg "exiftool.zip"
+    $tmp = Join-Path $Umg "exiftool-tmp"
+    $versionen = @()
+    $fehler = @()
+    foreach ($q in $quellen) {
+        try {
+            $c = (Invoke-WebRequest -Uri $q.ver -UseBasicParsing -UserAgent $UA).Content
+            if ($c -is [byte[]]) { $c = [Text.Encoding]::ASCII.GetString($c) }   # Spiegel liefern ver.txt als Binaerdatei
+            $versionen += ([string]$c).Trim()
+        } catch { $fehler += "$($q.ver): $($_.Exception.Message)" }
+    }
+    $versionen = @($versionen | Where-Object { $_ -match '^\d+\.\d+$' } | Select-Object -Unique)
+    $geladen = $null
+    foreach ($ver in $versionen) {
+        foreach ($q in $quellen) {
+            $url = $q.zip -f $ver
+            try {
+                if (Test-Path $zip) { Remove-Item $zip -Force }
+                Laden $url $zip
+                if (IstZip $zip) { $geladen = $ver; break }
+                $fehler += "$($url): keine ZIP-Datei erhalten"
+            } catch { $fehler += "$($url): $($_.Exception.Message)" }
+        }
+        if ($geladen) { break }
+    }
+    if (-not $geladen) { throw ("kein Download hat geklappt: " + ($fehler -join " | ")) }
+    if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
+    Expand-Archive -Path $zip -DestinationPath $tmp -Force
+    $exe = Get-ChildItem $tmp -Recurse -Filter "exiftool*.exe" | Select-Object -First 1
+    if (-not $exe) { throw "exiftool.exe nicht im Archiv gefunden" }
+    if (Test-Path $exDir) { Remove-Item $exDir -Recurse -Force }
+    Move-Item $exe.Directory.FullName $exDir
+    $neu = Join-Path $exDir $exe.Name
+    if ($exe.Name -ne "exiftool.exe") { Rename-Item -LiteralPath $neu -NewName "exiftool.exe" }
+    Remove-Item $zip, $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    & (Join-Path $exDir "exiftool.exe") -ver | Out-Null
+    Pruefe "exiftool-Test"
+    return $geladen
 }
 
 function Pruefe($was) { if ($LASTEXITCODE -ne 0) { throw "$was fehlgeschlagen (Fehlercode $LASTEXITCODE)" } }
 
 New-Item -ItemType Directory -Force -Path $Umg, $Daten, $UvDir | Out-Null
+
+if ($NurExiftool) {
+    Schritt "exiftool laden"
+    $v = ExiftoolLaden (Join-Path $Umg "exiftool")
+    Write-Host "exiftool $v installiert. Fertig." -ForegroundColor Green
+    exit 0
+}
 
 # Feste Versionen, damit die Installation in einem Jahr noch genauso funktioniert
 $UvVersion          = "0.13.10"
@@ -125,19 +186,10 @@ Schritt "5/6  exiftool laden"
 $exDir = Join-Path $Umg "exiftool"
 if (-not (Test-Path (Join-Path $exDir "exiftool.exe"))) {
     try {
-        $ver = (Invoke-WebRequest -Uri "https://exiftool.org/ver.txt" -UseBasicParsing).Content.Trim()
-        $zip = Join-Path $Umg "exiftool.zip"
-        Laden "https://exiftool.org/exiftool-$($ver)_64.zip" $zip
-        $tmp = Join-Path $Umg "exiftool-tmp"
-        Expand-Archive -Path $zip -DestinationPath $tmp -Force
-        $inner = Get-ChildItem $tmp -Directory | Select-Object -First 1
-        if (Test-Path $exDir) { Remove-Item $exDir -Recurse -Force }
-        Move-Item $inner.FullName $exDir
-        Rename-Item (Join-Path $exDir "exiftool(-k).exe") "exiftool.exe"
-        Remove-Item $zip, $tmp -Recurse -Force
+        $ver = ExiftoolLaden $exDir
         Write-Host "exiftool $ver installiert."
     } catch {
-        Write-Warning "exiftool konnte nicht geladen werden ($_). Das Programm laeuft trotzdem, nur ohne RAW-Vorschau und eingebettete Tags."
+        Write-Warning "exiftool konnte nicht geladen werden ($_). Das Programm laeuft trotzdem, nur ohne RAW-Vorschau und eingebettete Tags. Spaeter nachladen mit: exiftool-nachladen.bat"
     }
 }
 
