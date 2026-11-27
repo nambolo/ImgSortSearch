@@ -285,3 +285,28 @@ def test_fehler_bei_einem_bild_bricht_metadaten_nicht_ab(tmp_path, monkeypatch):
     monkeypatch.setattr(metadata, "_aus_pillow", kaputt)
     infos = metadata.lies_metadaten([a, b], exiftool=False)
     assert infos[0].datum == datetime(2023, 1, 5, 8, 15) and infos[1].datum_quelle == "exif"
+
+
+def test_ocr_scharfes_s_als_b_findbar(zustand):
+    """RapidOCR liest ß oft als B ("StraBe"): die Suche nach "Straße" soll das Bild trotzdem finden."""
+    from imgsortsearch.indexer import text_suche_bedingung
+    db = zustand.db
+    zustand.indexer.dateien_einlesen()
+    bid = db.eins("SELECT id FROM bilder LIMIT 1")["id"]
+    with db.verbindung() as v:
+        v.execute("UPDATE bilder SET ocr_text=? WHERE id=?", ("Müller GmbH, StraBe 5, GrüBe", bid))
+    db.suchtext_aktualisieren(bid)
+    for wort in ("Straße", "strasse", "Grüße", "StraBe", "GmbH"):
+        b, p = text_suche_bedingung(wort)
+        assert db.eins(f"SELECT id FROM bilder WHERE id=? AND {b}", (bid, *p)), wort
+
+
+def test_suchtext_wird_einmal_aufgefrischt(zustand):
+    db = zustand.db
+    zustand.indexer.dateien_einlesen()
+    db.meta_setzen("suchtext_stand", "1")
+    with db.verbindung() as v:
+        v.execute("UPDATE bilder SET ocr_text='StraBe', suchtext=''")
+    assert db.suchtext_auffrischen() == db.eins("SELECT COUNT(*) AS n FROM bilder")["n"]
+    assert db.eins("SELECT COUNT(*) AS n FROM bilder WHERE suchtext LIKE '%strasse%'")["n"] > 0
+    assert db.suchtext_auffrischen() == 0

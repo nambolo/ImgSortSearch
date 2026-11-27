@@ -146,3 +146,30 @@ def test_ordner_entfernen_laesst_unterordner_einer_anderen_quelle(client, zustan
     r = client.post("/api/quellen/entfernen", json={"pfad": str(heim / "backup"), "aus_index": True}).json()
     assert r["entfernt"] == 5  # e.jpg gehört weiter zum eingetragenen Unterordner
     assert [b["name"] for b in client.get("/api/bilder").json()["bilder"]] == ["e.jpg"]
+
+
+@hat_exiftool
+def test_zweimal_taggen_behaelt_original(tmp_path):
+    """Zweites "Nur taggen" mit eingebetteten Tags (z. B. nach dem Benennen einer Person) darf nicht
+    für jede Datei mit "Sicherung vorhanden" scheitern. Rückgängig führt zum unveränderten Original."""
+    p = mache_bild(tmp_path / "Fotos" / "Grüße.jpg", "iPhone 13", "2024:03:12 10:15:00")
+    original = p.read_bytes()
+    a = sortieren.Auftrag(pfad=p, kategorie="Privat", datum=None, kamera="", tags=["Strand"], personen=[])
+    s = {"modus": "nur_taggen", "tags": "einbetten"}
+    erg1 = sortieren.ausfuehren([a], s, tmp_path / "prot", echt=True)
+    a.personen = ["Jürgen Müller"]
+    erg2 = sortieren.ausfuehren([a], s, tmp_path / "prot", echt=True)
+    assert erg1["zaehler"]["ok"] == 1 and erg2["zaehler"]["ok"] == 1, erg2["fehler"]
+    assert erg1["protokoll"] != erg2["protokoll"]
+    out = subprocess.run(["exiftool", "-s3", "-Subject", "-charset", "filename=utf8", str(p)],
+                         capture_output=True).stdout.decode("utf-8")
+    assert "Jürgen Müller" in out and "Strand" in out
+    assert Path(str(p) + "_original").read_bytes() == original
+    sortieren.rueckgaengig(Path(erg2["protokoll"]), echt=True)
+    u1 = sortieren.rueckgaengig(Path(erg1["protokoll"]), echt=True)
+    assert p.read_bytes() == original and not u1["probleme"]
+    assert not list(p.parent.glob("*_original"))
+    # fremde Sicherung (nicht von uns) bleibt geschützt
+    Path(str(p) + "_original").write_bytes(b"fremd")
+    erg3 = sortieren.ausfuehren([a], s, tmp_path / "prot", echt=True)
+    assert erg3["zaehler"]["fehler"] == 1 and "Sicherung" in erg3["fehler"][0]

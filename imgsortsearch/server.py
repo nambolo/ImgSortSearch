@@ -45,8 +45,15 @@ class Zustand:
         self.dubletten_ergebnis = None
         self.kacheln = orte.Kacheln()
         self.indexer.nach_metadaten.append(self._orte_zuordnen)
-        # ältere Indexe: Ortsnamen einmal nachtragen (geht schnell, es wird kein Bild geöffnet)
-        threading.Thread(target=self._orte_zuordnen, daemon=True).start()
+        # ältere Indexe: Ortsnamen und Suchtext einmal nachtragen (geht schnell, es wird kein Bild geöffnet)
+        threading.Thread(target=self._nachtragen, daemon=True).start()
+
+    def _nachtragen(self):
+        self._orte_zuordnen()
+        try:
+            self.db.suchtext_auffrischen()
+        except Exception:
+            log.exception("Suchtext auffrischen fehlgeschlagen")
 
     def _orte_zuordnen(self):
         try:

@@ -181,17 +181,27 @@ def _abgelehnt(db: Datenbank) -> dict[int, set[int]]:
     return erg
 
 
-def _kern(mat: np.ndarray, fest: np.ndarray, s: dict) -> np.ndarray:
-    """Maske der Gesichter einer Person, die zu ihrem Kern passen.
+def _kern(mat: np.ndarray, fest: np.ndarray, s: dict) -> tuple[np.ndarray, list[np.ndarray]]:
+    """Maske der Gesichter einer Person, die zu ihrem Kern passen, und die Zentren des Kerns.
 
     Kern = bestätigte Gesichter, sonst die größte Untergruppe. So bleibt "Marlena" Marlena, auch
-    wenn das alte Modell ein paar fremde Gesichter dazugepackt hat."""
+    wenn das alte Modell ein paar fremde Gesichter dazugepackt hat. Bestätigte Gesichter können
+    mehrere Untergruppen bilden (z. B. zusammengeführt: dieselbe Person als Kind und als Erwachsene),
+    dann zählt jede davon als Zentrum."""
     if fest.any():
-        zentrum = _norm(mat[fest].mean(0))
+        sub = mat[fest]
+        gruppen = cluster(sub, s["gruppe"], min_groesse=1) if len(sub) > 1 else [[0]]
+        zentren = [_norm(sub[g].mean(0)) for g in gruppen] or [_norm(sub.mean(0))]
     else:
         gruppen = cluster(mat, s["gruppe"], min_groesse=1) if len(mat) > 1 else [[0]]
-        zentrum = _norm(mat[gruppen[0]].mean(0)) if gruppen else _norm(mat.mean(0))
-    return fest | (mat @ zentrum >= s["bleiben"])
+        zentren = [_norm(mat[gruppen[0]].mean(0)) if gruppen else _norm(mat.mean(0))]
+    naechstes = (mat @ np.stack(zentren).T)
+    ok = fest | (naechstes.max(axis=1) >= s["bleiben"])
+    if len(zentren) == 1:
+        return ok, [_norm(mat[ok].mean(0))]
+    zuordnung = naechstes.argmax(axis=1)
+    return ok, [_norm(mat[ok & (zuordnung == k)].mean(0)) if (ok & (zuordnung == k)).any() else z
+                for k, z in enumerate(zentren)]
 
 
 def neu_gruppieren(db: Datenbank, einstellungen: dict | None = None) -> dict:
@@ -210,14 +220,13 @@ def neu_gruppieren(db: Datenbank, einstellungen: dict | None = None) -> dict:
     for i in np.where(~fest & (person > 0))[0]:
         if int(person[i]) not in bleibende:
             person[i] = 0
-    zentren: dict[int, np.ndarray] = {}
+    zentren: dict[int, list[np.ndarray]] = {}
     for pid in bleibende:
         idx = np.where(person == pid)[0]
         if not len(idx):
             continue
-        ok = _kern(mat[idx], fest[idx], s)
+        ok, zentren[pid] = _kern(mat[idx], fest[idx], s)
         person[idx[~ok]] = 0
-        zentren[pid] = _norm(mat[idx[ok]].mean(0))
 
     # Negativbeispiele: Gesichter, die der Nutzer bei einer Person abgelehnt hat
     negativ: dict[int, list[int]] = {}
@@ -226,12 +235,16 @@ def neu_gruppieren(db: Datenbank, einstellungen: dict | None = None) -> dict:
             for pid in pids:
                 negativ.setdefault(pid, []).append(index_von[gid])
 
-    def zuordnen(kandidaten: np.ndarray, zentren: dict[int, np.ndarray]) -> None:
+    def zuordnen(kandidaten: np.ndarray, zentren: dict[int, list[np.ndarray]]) -> None:
         if not zentren or not len(kandidaten):
             return
         pids = list(zentren)
-        zmat = np.stack([zentren[p] for p in pids])
-        sims = mat[kandidaten] @ zmat.T
+        # eine Person kann mehrere Zentren haben: es zählt das nächste
+        spalte = np.array([k for k, p in enumerate(pids) for _ in zentren[p]])
+        alle = mat[kandidaten] @ np.stack([z for p in pids for z in zentren[p]]).T
+        sims = np.full((len(kandidaten), len(pids)), -1.0, dtype=np.float32)
+        for k in range(len(pids)):
+            sims[:, k] = alle[:, spalte == k].max(axis=1)
         for r, i in enumerate(kandidaten):
             gid = int(d["id"][i])
             zeile = sims[r].copy()
@@ -276,7 +289,7 @@ def neu_gruppieren(db: Datenbank, einstellungen: dict | None = None) -> dict:
                 neue_ids[k] = pid
             person[idx] = pid
     # schwache Gesichter dürfen sich neuen Gruppen anschließen
-    neue_zentren = {pid: _norm(mat[idx].mean(0)) for idx, pid in zip(neue, neue_ids)}
+    neue_zentren = {pid: [_norm(mat[idx].mean(0))] for idx, pid in zip(neue, neue_ids)}
     zuordnen(np.where((person == 0) & ~fest)[0], neue_zentren)
 
     # speichern
@@ -347,25 +360,38 @@ def _festhalten(con, person_id: int) -> None:
 
 def umbenennen(db: Datenbank, person_id: int, name: str) -> int:
     name = name.strip() or None
+    # gibt es schon eine Person mit diesem Namen: zusammenführen
+    vorhanden = db.eins("SELECT id FROM personen WHERE name=? AND id<>?", (name, person_id)) if name else None
+    if vorhanden:
+        zusammenfuehren(db, vorhanden[0], [person_id])
+        return vorhanden[0]
     with db.verbindung() as con:
-        # gibt es schon eine Person mit diesem Namen: zusammenführen
-        vorhanden = con.execute("SELECT id FROM personen WHERE name=? AND id<>?", (name, person_id)).fetchone() \
-            if name else None
-        if vorhanden:
-            con.execute("UPDATE gesichter SET person_id=? WHERE person_id=?", (vorhanden[0], person_id))
-            con.execute("UPDATE OR IGNORE gesicht_abgelehnt SET person_id=? WHERE person_id=?",
-                        (vorhanden[0], person_id))
-            con.execute("DELETE FROM personen WHERE id=?", (person_id,))
-            person_id = vorhanden[0]
-        else:
-            con.execute("UPDATE personen SET name=? WHERE id=?", (name, person_id))
+        con.execute("UPDATE personen SET name=? WHERE id=?", (name, person_id))
         _festhalten(con, person_id)
     db.suchtext_aktualisieren_viele(_bilder_von(db, [person_id]))
     return person_id
 
 
+def _vertreter(db: Datenbank, person_id: int, anzahl: int = 5) -> list[int]:
+    """Die Gesichter, die eine Person am besten darstellen (nahe am Zentrum, gute Qualität)."""
+    zeilen = db.abfrage("SELECT id, vektor, person_fest, COALESCE(qualitaet, score, 0) AS q FROM gesichter "
+                        "WHERE person_id=? AND ignoriert=0 AND modell=?", (person_id, GESICHT_KENNUNG))
+    if not zeilen:
+        return []
+    mat = _norm(np.stack([blob_zu_vektor(z["vektor"]) for z in zeilen]))
+    ok, zentren = _kern(mat, np.array([bool(z["person_fest"]) for z in zeilen]), schwellen())
+    naehe = (mat @ np.stack(zentren).T).max(axis=1) + 0.2 * np.array([z["q"] for z in zeilen])
+    reihe = [i for i in np.argsort(-naehe) if ok[i]]
+    return [int(zeilen[i]["id"]) for i in reihe[:anzahl]]
+
+
 def zusammenfuehren(db: Datenbank, ziel_id: int, quell_ids: list[int]) -> None:
+    """Personen vereinen. Ein paar typische Gesichter jeder Gruppe gelten danach als bestätigt:
+    sonst würde das nächste Neugruppieren die kleinere Gruppe wieder abtrennen, wenn sie anders
+    aussieht (anderes Alter, Brille ...)."""
+    vertreter = [g for p in [ziel_id, *quell_ids] for g in _vertreter(db, p)]
     with db.verbindung() as con:
+        con.executemany("UPDATE gesichter SET person_fest=1 WHERE id=?", [(g,) for g in vertreter])
         for q in quell_ids:
             if q != ziel_id:
                 con.execute("UPDATE gesichter SET person_id=? WHERE person_id=?", (ziel_id, q))
