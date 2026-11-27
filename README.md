@@ -8,6 +8,7 @@ Lokales Programm für Windows, das ein großes Foto-Backup durchsuchbar macht un
 - **Ergebnisse:** als Raster mit Vorschaubildern oder als Liste mit großer Ansicht; markierte Bilder mit **Strg+C** kopieren und im Explorer mit **Strg+V** einfügen
 - **Kategorien selbst festlegen** (z. B. Arbeit, Privat, Natur, Tiere): automatisch über Themen („Whiteboard“, „Technische Zeichnung“ → Arbeit), Aufnahmezeit und eigene Regeln, oder per Hand für ganze Suchergebnisse
 - **Sortieren:** kopieren, verschieben oder an Ort und Stelle taggen, **Umbenennen optional**, Tags als XMP-Datei oder in die Datei; jeder Lauf ist **rückgängig** zu machen, Originale werden nie gelöscht
+- **Dubletten:** findet exakt gleiche Dateien und ähnliche Fassungen (verkleinert, neu komprimiert, WhatsApp-Kopien), zeigt sie nebeneinander mit Auflösung, Größe und Aufnahmedaten und schlägt vor, welche Datei bleibt; Aussortiertes kommt in einen Quarantäne-Ordner oder den Papierkorb, rückgängig machbar
 - **Index fortsetzen:** Start per Knopf, jederzeit anhalten; beim nächsten Mal werden nur neue oder geänderte Bilder analysiert
 
 ## Installation (portabel)
@@ -53,6 +54,10 @@ Prozessor (die sind auch so schnell).
 4. **Personen:** Gruppen benennen, gleiche Personen zusammenführen. Oder ein Foto hineinziehen, um alle Bilder dieser Person zu finden.
 5. **Suche:** prüfen, korrigieren (Bilder markieren → Kategorie anklicken).
 6. **Sortieren:** Modus wählen, Vorschau ansehen, ausführen. Unter „Bisherige Läufe“ lässt sich jeder Lauf zurücknehmen.
+7. **Dubletten:** „Dubletten suchen“. Nutzt den vorhandenen Index, es wird nichts neu analysiert. Pro Gruppe ist das Bild
+   grün markiert, das bleiben soll (höchste Auflösung, Aufnahmedaten der Kamera, größte Datei, Name ohne „Kopie“,
+   älteste Datei). Per Klick umstellen, dann die Gruppe oder alle angezeigten Gruppen bereinigen. Serienbilder
+   (andere Aufnahmezeit laut Kamera) gelten nicht als Dubletten.
 
 ## Wie lange dauert der Index?
 
