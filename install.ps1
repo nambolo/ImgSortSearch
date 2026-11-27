@@ -144,7 +144,7 @@ $constraints = Join-Path $Umg "constraints.txt"
 # Wurde vorher mit einer anderen Grafikkarten-Variante installiert, PyTorch austauschen
 # (sonst bleibt z. B. die DirectML-Version liegen, weil "torch" schon vorhanden ist)
 $merker = Join-Path $Umg "beschleunigung.txt"
-$vorher = if (Test-Path $merker) { (Get-Content $merker -Raw).Trim() } else { "" }
+$vorher = if (Test-Path $merker) { "$(Get-Content $merker -Raw)".Trim() } else { "" }
 if ($vorher -and $vorher -ne $Beschleunigung) {
     Write-Host "Vorher installiert: $vorher, jetzt: $Beschleunigung. Tausche PyTorch aus."
     & $uv pip uninstall --python $Py torch torchvision torch-directml
