@@ -357,8 +357,14 @@ def bereinigen(db: Datenbank, weg_ids: list[int], behalten_ids: set[int], art: s
     platz = ",".join("?" * len(weg_ids))
     pfade = {r["id"]: Path(r["pfad"]) for r in db.abfrage(f"SELECT id, pfad FROM bilder WHERE id IN ({platz})",
                                                           weg_ids)}
-    lauf = f"{datetime.now():%Y%m%d-%H%M%S}"
     protokoll_ordner.mkdir(parents=True, exist_ok=True)
+    # eigener Name je Lauf, auch bei zwei Läufen in derselben Sekunde: sonst landen beide im selben
+    # Protokoll (Rückgängig nimmt beide zurück) und im selben Quarantäne-Ordner
+    basis = f"{datetime.now():%Y%m%d-%H%M%S}"
+    lauf, n = basis, 1
+    while (protokoll_ordner / f"dubletten-{lauf}.jsonl").exists() or (quarantaene / lauf).exists():
+        n += 1
+        lauf = f"{basis}_{n}"
     prot_datei = protokoll_ordner / f"dubletten-{lauf}.jsonl"
     erledigt, fehler, bytes_ = [], [], 0
     with open(prot_datei, "a", encoding="utf-8") as prot:
@@ -383,6 +389,10 @@ def bereinigen(db: Datenbank, weg_ids: list[int], behalten_ids: set[int], art: s
                         schreibe({"op": "papierkorb", "quelle": str(x), "ziel": str(x)})
                 else:
                     ziel = _quarantaene_ziel(quarantaene, lauf, p)
+                    k = 1
+                    while ziel.exists():  # nie eine Datei in der Quarantäne überschreiben
+                        k += 1
+                        ziel = _quarantaene_ziel(quarantaene, lauf, p.with_name(f"{p.stem}_{k}{p.suffix}"))
                     ziel.parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(p), str(ziel))
                     schreibe({"op": "verschoben", "quelle": str(p), "ziel": str(ziel)})

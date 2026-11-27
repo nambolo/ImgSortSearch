@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
@@ -135,7 +135,13 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
     def einstellungen_schreiben(neu: dict = Body(...)):
         alt_beschl = z.e.get("beschleunigung")
         alt_lang = dict(z.e["beschreibung"]["ausfuehrlich"])
+        alt_ocr = z.e["ocr"]["modus"]
         werte = z.e.aktualisieren(neu)
+        if alt_ocr == "text_bilder" and werte["ocr"]["modus"] == "alle":
+            # Bisher wurde nur bei Bildern mit Text gelesen. Die übrigen sind schon "erledigt" und kämen
+            # sonst nie dran: Texterkennung für Bilder ohne erkannten Text neu einplanen.
+            with z.db.verbindung() as v:
+                v.execute("UPDATE bilder SET schritt_ocr=0 WHERE schritt_ocr=1 AND (ocr_text IS NULL OR ocr_text='')")
         if "kategorien" in neu:
             # Wurde eine Kategorie zur Zusatzkategorie, werden von Hand gesetzte Zuordnungen mitgenommen
             zusatz = zusatz_kategorien(werte)
@@ -280,7 +286,7 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
 
     @app.get("/api/bilder")
     def bilder(q: str = "", kategorie: str = "", jahr: str = "", kamera: str = "", person: int = 0, thema: str = "",
-               aehnlich_zu: int = 0, nur_manuell: bool = False, sortierung: str = "datum_ab",
+               aehnlich_zu: int = 0, nur_manuell: bool = False, sortierung: str = "relevanz",
                offset: int = 0, limit: int = 200, art: str = "beides", ort: str = "", bereich: str = ""):
         wo, par = bedingungen(kategorie, jahr, kamera, person, thema, nur_manuell, ort, bereich)
 
@@ -305,16 +311,27 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
                         stueck = bilder_p[i:i + 900]
                         teil |= {r["id"] for r in z.db.abfrage(
                             f"SELECT id FROM bilder WHERE {tb} AND id IN ({','.join('?' * len(stueck))})", (*tp, *stueck))}
+                    # "Anna Strand": auch Bilder der Person, die nur dem Inhalt nach zum Rest passen
+                    if art in ("beides", "bedeutung"):
+                        clip = z.m.clip()
+                        if clip is not None:
+                            sem_p = _vektor_rang(clip.texte([rest])[0], schwelle=0.17, max_n=600, nur=bilder_p)
+                            if sem_p:
+                                grenze = max(sem_p.values()) - 0.05
+                                for i, s in sem_p.items():
+                                    if s >= grenze and i not in teil:
+                                        rang[i] = 2.5 + s  # hinter den Textbefunden der Person
                     bilder_p = list(teil)
                 for i in bilder_p:
                     rang[i] = 3.0
             # Nur ein Name gesucht: genau die Bilder dieser Person. Die Bedeutungssuche kennt keine Namen
             # und würde sonst zufällige Bilder beimischen, die Textsuche Teilwörter ("Anna" in "Johanna").
-            nur_name = bool(pids) and exakt
+            # Name + weiterer Begriff ("Anna Strand"): ebenso nur Bilder dieser Person, die dazu passen
+            nur_name = bool(pids) and (exakt or (bool(rest) and _name_teil_exakt(q, rest)))
             if art in ("beides", "text") and not nur_name:
                 tb, tp = text_suche_bedingung(q)
                 for r in z.db.abfrage(f"SELECT id FROM bilder WHERE {tb}", tp):
-                    rang[r["id"]] = 2.0  # Textbefunde zuerst
+                    rang[r["id"]] = max(rang.get(r["id"], 0), 2.0)  # Textbefunde zuerst, Personentreffer davor
             if art in ("beides", "bedeutung") and not nur_name:
                 clip = z.m.clip()
                 if clip is not None:
@@ -337,15 +354,49 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
                 teil = ids[i:i + 900]
                 treffer += z.db.abfrage(f"SELECT *, {KAT} AS kategorie FROM bilder WHERE {wo} AND id IN "
                                         f"({','.join('?' * len(teil))})", (*par, *teil))
-            treffer.sort(key=lambda r: -rang[r["id"]])
+            # Standard: beste Treffer zuerst, bei gleichem Rang die neuesten. Eine andere gewählte
+            # Sortierung gilt auch für die Treffer (früher wurde sie bei einer Suche still ignoriert).
+            _sortieren(treffer, rang, sortierung)
             return {"gesamt": len(treffer), "bilder": [kurz(r) for r in treffer[offset:offset + limit]]}
 
-        ordnung = {"datum_ab": "datum DESC", "datum_auf": "datum ASC", "name": "pfad ASC",
-                   "unsicher": "sicherheit ASC, datum DESC"}.get(sortierung, "datum DESC")
+        # immer eindeutig (id als letzter Schlüssel), sonst kann "Weitere laden" Bilder doppelt bringen
+        ordnung = {"datum_ab": "datum DESC, id DESC", "datum_auf": "datum IS NULL, datum ASC, id ASC",
+                   "name": "pfad COLLATE NOCASE ASC, id ASC",
+                   "unsicher": "kategorie_manuell IS NOT NULL, sicherheit ASC, datum DESC, id DESC"
+                   }.get(sortierung, "datum DESC, id DESC")
         gesamt = z.db.eins(f"SELECT COUNT(*) n FROM bilder WHERE {wo}", par)["n"]
         zeilen = z.db.abfrage(f"SELECT *, {KAT} AS kategorie FROM bilder WHERE {wo} ORDER BY {ordnung} "
                               f"LIMIT ? OFFSET ?", (*par, limit, offset))
         return {"gesamt": gesamt, "bilder": [kurz(r) for r in zeilen]}
+
+    def _sortieren(treffer: list, rang: dict[int, float], sortierung: str) -> None:
+        """Suchtreffer sortieren. Standard ("relevanz"): beste Treffer zuerst, bei gleichem Rang die neuesten.
+        Eine andere gewählte Sortierung gilt auch für Suchtreffer (früher wurde sie bei einer Suche ignoriert)."""
+        neueste = lambda r: (r["datum"] is not None, r["datum"] or "", r["id"])  # noqa: E731 (ohne Datum zuletzt)
+        if sortierung == "datum_ab":
+            treffer.sort(key=neueste, reverse=True)
+        elif sortierung == "datum_auf":
+            treffer.sort(key=lambda r: (r["datum"] is None, r["datum"] or "", r["id"]))
+        elif sortierung == "name":
+            treffer.sort(key=lambda r: (r["pfad"].lower(), r["id"]))
+        elif sortierung == "unsicher":
+            treffer.sort(key=neueste, reverse=True)
+            treffer.sort(key=lambda r: (r["kategorie_manuell"] is not None, r["sicherheit"] or 0))
+        else:
+            treffer.sort(key=neueste, reverse=True)
+            treffer.sort(key=lambda r: -rang[r["id"]])  # stabil: bei gleichem Rang bleiben die neuesten vorn
+
+    def _name_teil_exakt(q: str, rest: str) -> bool:
+        """Sind die Wörter der Anfrage, die zu einem Namen gehören, ganze Namen (nicht nur Wortanfänge)?"""
+        from .datenbank import normalisiere
+        uebrig = rest.split()
+        name_woerter = []
+        for w in normalisiere(q).split():
+            if w in uebrig:
+                uebrig.remove(w)
+            else:
+                name_woerter.append(w)
+        return bool(name_woerter) and personen.namen_treffer(z.db, " ".join(name_woerter))[2]
 
     def _beschreibung_rang(v: np.ndarray, sem: dict[int, float]) -> dict[int, float]:
         """Bedeutungssuche in den ausführlichen Beschreibungen (Satz für Satz).
@@ -367,10 +418,15 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
         top = max(bester.values(), default=0)
         return {i: basis - 0.001 - (top - s) for i, s in sorted(bester.items(), key=lambda x: -x[1])[:300]}
 
-    def _vektor_rang(v: np.ndarray, schwelle: float, max_n: int) -> dict[int, float]:
+    def _vektor_rang(v: np.ndarray, schwelle: float, max_n: int, nur=None) -> dict[int, float]:
         ids, mat = z.db.clip_matrix()
         if not len(ids) or mat.shape[1] != v.shape[0]:
             return {}
+        if nur is not None:  # nur unter diesen Bildern suchen
+            maske = np.isin(ids, np.fromiter(nur, dtype=np.int64))
+            ids, mat = ids[maske], mat[maske]
+            if not len(ids):
+                return {}
         sims = mat @ (v / (np.linalg.norm(v) + 1e-9))
         ordnung = np.argsort(-sims)[:max_n]
         return {int(ids[i]): float(sims[i]) for i in ordnung if sims[i] >= schwelle}
@@ -401,8 +457,17 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
             "LEFT JOIN personen p ON p.id=g.person_id WHERE g.bild_id=? AND g.ignoriert=0", (bild_id,))]
         return d
 
+    def _bild_antwort(p: Path, request: Request):
+        """Zwischengespeichertes Bild mit ETag; der Browser fragt jedes Mal kurz nach (no-cache)."""
+        st = p.stat()
+        etag = f'"{st.st_mtime_ns:x}-{st.st_size:x}"'
+        kopf = {"Cache-Control": "no-cache", "ETag": etag}
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=kopf)
+        return FileResponse(p, media_type="image/jpeg", headers=kopf)
+
     @app.get("/api/vorschau/{bild_id}")
-    def vorschau(bild_id: int):
+    def vorschau(bild_id: int, request: Request):
         p = vorschau_pfad(bild_id)
         if not p.exists():
             r = bild_oder_404(bild_id)
@@ -410,7 +475,10 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
                 vorschau_erzeugen(bild_id, modelle.bild_laden(Path(r["pfad"]), max_kante=800))
             except Exception:
                 raise HTTPException(404, "Keine Vorschau möglich")
-        return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
+        # nicht blind zwischenspeichern: nach "Index zurücksetzen" oder Entfernen von Bildern vergibt die
+        # Datenbank die Nummern neu, der Browser zeigte sonst einen Tag lang die alten Vorschaubilder.
+        # "no-cache" heißt: kurz nachfragen (ETag), unverändert kommt nur "304" zurück.
+        return _bild_antwort(p, request)
 
     @app.get("/api/ansicht/{bild_id}")
     def ansicht(bild_id: int, kante: int = 1600):
@@ -424,7 +492,7 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
         return Response(puffer.getvalue(), media_type="image/jpeg")
 
     @app.get("/api/gesicht/{gesicht_id}")
-    def gesicht_bild(gesicht_id: int):
+    def gesicht_bild(gesicht_id: int, request: Request):
         g = z.db.eins("SELECT g.*, b.pfad FROM gesichter g JOIN bilder b ON b.id=g.bild_id WHERE g.id=?",
                       (gesicht_id,))
         if not g:
@@ -440,7 +508,7 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
             ausschnitt = img.crop((max(0, int(x0)), max(0, int(y0)), min(w, int(x1)), min(h, int(y1))))
             ausschnitt.thumbnail((200, 200))
             ausschnitt.save(cache, "JPEG", quality=85)
-        return FileResponse(cache, media_type="image/jpeg")
+        return _bild_antwort(cache, request)
 
     @app.post("/api/bilder/zusatz")
     def zusatz_setzen(daten: dict = Body(...)):
@@ -858,6 +926,13 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
             b = {int(i) for i in g.get("behalten", [])}
             if not b:
                 raise HTTPException(400, "In jeder Gruppe muss mindestens ein Bild behalten werden.")
+            # das behaltene Bild muss wirklich noch da sein, sonst wäre danach keine Fassung mehr übrig
+            # (z. B. veraltetes Ergebnis, Datei inzwischen woanders)
+            da = [r["pfad"] for r in z.db.abfrage(
+                f"SELECT pfad FROM bilder WHERE id IN ({','.join('?' * len(b))})", list(b))]
+            if not any(Path(p).is_file() for p in da):
+                raise HTTPException(400, "Das Bild zum Behalten ist nicht mehr da. Bitte die Dublettensuche "
+                                         "neu starten.")
             behalten |= b
             weg += [int(i) for i in g.get("weg", [])]
         quarantaene = quarantaene_ordner(z.e)
