@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import metadata, modelle
+from . import metadata, modelle, personen
 from .datenbank import Datenbank, normalisiere, vektor_zu_blob
 from .einstellungen import Einstellungen, daten_ordner
 from .klassifizierung import Themen, einordnen, thema_prompt, zusatz_kategorien
@@ -464,18 +464,8 @@ class Indexer:
                     try:
                         gef = gesichter.finde(img)
                         bw, bh = img.size  # Boxen relativ (0..1) speichern
-                        alte = [r["id"] for r in self.db.abfrage("SELECT id FROM gesichter WHERE bild_id=?",
-                                                                   (z["id"],))]
-                        with self.db.verbindung() as v:
-                            v.execute("DELETE FROM gesichter WHERE bild_id=?", (z["id"],))
-                            for g in gef:
-                                v.execute("INSERT INTO gesichter (bild_id, x, y, w, h, score, vektor) "
-                                          "VALUES (?,?,?,?,?,?,?)",
-                                          (z["id"], g["x"] / bw, g["y"] / bh, g["w"] / bw, g["h"] / bh, g["score"],
-                                           vektor_zu_blob(g["vektor"])))
-                            v.execute("UPDATE bilder SET schritt_gesichter=1, anzahl_gesichter=? WHERE id=?",
-                                      (len(gef), z["id"]))
-                        caches_entfernen(gesicht_ids=alte)
+                        self._gesichter_speichern(z["id"], gef, bw, bh,
+                                                  getattr(gesichter, "kennung", modelle.GESICHT_KENNUNG))
                     except Exception as ex:
                         self._fehler(f"Gesichter {Path(z['pfad']).name}: {ex}")
                 if ocr and not z["schritt_ocr"]:
@@ -501,6 +491,40 @@ class Indexer:
             rest = (len(offen) - erledigt) * dauer / max(1, erledigt)
             self._setze(fertig=min(len(offen), i + len(teil)),
                         meldung=f"Analysiere Bilder ... noch etwa {_dauer_text(rest)}")
+
+    def _gesichter_speichern(self, bild_id: int, gef: list[dict], bw: int, bh: int, kennung: str) -> None:
+        """Ersetzt die Gesichter eines Bildes. Was der Nutzer an derselben Stelle festgelegt hat
+        (Person, "Nicht diese Person", "kein Gesicht"), wird auf das neue Gesicht übertragen."""
+        alte = [dict(r) for r in self.db.abfrage(
+            "SELECT g.id, g.x, g.y, g.w, g.h, g.person_id, g.person_fest, g.ignoriert, "
+            "       (p.name IS NOT NULL OR p.fest=1) AS person_bleibt "
+            "FROM gesichter g LEFT JOIN personen p ON p.id=g.person_id WHERE g.bild_id=?", (bild_id,))]
+        abgelehnt: dict[int, list[int]] = {}
+        if alte:
+            for r in self.db.abfrage(f"SELECT gesicht_id, person_id FROM gesicht_abgelehnt WHERE gesicht_id IN "
+                                     f"({','.join('?' * len(alte))})", [a["id"] for a in alte]):
+                abgelehnt.setdefault(r["gesicht_id"], []).append(r["person_id"])
+        boxen = [(g["x"] / bw, g["y"] / bh, g["w"] / bw, g["h"] / bh) for g in gef]
+        vorgaenger = personen.uebernahme_finden(alte, boxen)
+        with self.db.verbindung() as v:
+            v.execute("DELETE FROM gesichter WHERE bild_id=?", (bild_id,))
+            for g, box, alt in zip(gef, boxen, vorgaenger):
+                person_id, fest, ignoriert = None, 0, 0
+                if alt:
+                    ignoriert = alt["ignoriert"] or 0
+                    # nur Zuordnungen übernehmen, die der Nutzer gesehen hat; der Rest wird neu gruppiert
+                    if alt["person_id"] and (alt["person_fest"] or alt["person_bleibt"]):
+                        person_id, fest = alt["person_id"], alt["person_fest"] or 0
+                gid = v.execute("INSERT INTO gesichter (bild_id, x, y, w, h, score, qualitaet, modell, vektor, "
+                                "person_id, person_fest, ignoriert) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                                (bild_id, *box, g["score"], g.get("qualitaet", g["score"]), kennung,
+                                 vektor_zu_blob(g["vektor"]), person_id, fest, ignoriert)).lastrowid
+                if alt:
+                    v.executemany("INSERT OR IGNORE INTO gesicht_abgelehnt VALUES (?,?)",
+                                  [(gid, pid) for pid in abgelehnt.get(alt["id"], [])])
+            v.execute("UPDATE bilder SET schritt_gesichter=1, anzahl_gesichter=? WHERE id=?",
+                      (sum(1 for g, a in zip(gef, vorgaenger) if not (a and a["ignoriert"])), bild_id))
+        caches_entfernen(gesicht_ids=[a["id"] for a in alte])
 
     def _fehler(self, text):
         log.warning(text)

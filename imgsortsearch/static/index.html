@@ -116,7 +116,7 @@
     <!-- ======================= Personen ======================= -->
     <section id="ansicht-personen" class="ansicht">
       <header class="titel">
-        <div><h1>Personen</h1><p>Gesichter werden automatisch gruppiert. Gib Gruppen einen Namen, dann findest du sie auch über die Suche.</p></div>
+        <div><h1>Personen</h1><p>Gesichter werden automatisch gruppiert. Gib Gruppen einen Namen, dann findest du sie auch über die Suche. Ein Klick aufs Gesicht zeigt alle Gesichter der Person zum Korrigieren.</p></div>
         <div class="zeile">
           <button class="knopf leicht" id="personen-gruppieren">Neu gruppieren</button>
           <button class="knopf" id="personen-zusammen" disabled>Auswahl zusammenführen</button>
@@ -125,6 +125,20 @@
       <div class="karte ablage" id="ablage">
         <div><strong>Person per Foto suchen</strong><br><span class="hinweis">Foto hierher ziehen oder auswählen. Gefunden werden alle Bilder mit dieser Person.</span></div>
         <label class="knopf primaer">Foto wählen<input type="file" id="person-foto" accept="image/*" hidden></label>
+      </div>
+      <div class="karte hinweis-karte" id="personen-hinweis" hidden></div>
+      <div class="karte" id="person-detail" hidden>
+        <div class="zeile zwischen">
+          <div><strong id="pd-titel"></strong><br><span class="hinweis">Unsicherste Gesichter zuerst. Falsche anklicken (Umschalt für Bereich), dann unten korrigieren.</span></div>
+          <div class="zeile"><button class="knopf leicht" id="pd-bilder">Alle Bilder zeigen</button><button class="knopf leicht" id="pd-schliessen">Schließen</button></div>
+        </div>
+        <div class="gesichter-gitter" id="pd-gesichter"></div>
+        <div class="zeile pd-aktionen">
+          <span id="pd-anzahl" class="hinweis">Nichts ausgewählt</span>
+          <button class="knopf" id="pd-nicht" disabled title="Gesicht aus dieser Person nehmen. Ähnliche Gesichter werden ihr auch nicht mehr zugeordnet.">Nicht diese Person</button>
+          <button class="knopf leicht" id="pd-kein" disabled title="Fehlerkennung, z. B. Muster, Statue oder Plakat">Kein Gesicht</button>
+          <select id="pd-ziel" disabled><option value="">Anderer Person zuweisen …</option></select>
+        </div>
       </div>
       <div class="personen-gitter" id="personen-gitter"></div>
     </section>

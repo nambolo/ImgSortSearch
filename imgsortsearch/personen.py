@@ -1,75 +1,303 @@
-"""Personen: Gesichter gruppieren, benennen, per Referenzbild suchen."""
+"""Personen: Gesichter gruppieren, benennen, korrigieren, per Referenzbild suchen.
+
+Ablauf beim Gruppieren (``neu_gruppieren``):
+
+1. Personen, die der Nutzer bearbeitet hat (Name, Zusammenführen, Korrektur), bleiben. Ihre
+   automatisch zugeordneten Gesichter werden geprüft: Was nicht zum Kern der Person passt, fliegt raus.
+2. Automatisch gebildete, unbearbeitete Gruppen werden aufgelöst und neu gebildet.
+3. Freie Gesichter kommen zur ähnlichsten bekannten Person, wenn sie klar genug passen und nicht
+   abgelehnt wurden ("Nicht diese Person").
+4. Der Rest wird geclustert (Chinese Whispers auf einem Ähnlichkeitsgraphen). Nur gute Gesichter
+   (scharf, groß genug, nicht im Profil) dürfen neue Gruppen bilden.
+
+Vom Nutzer bestätigte Zuordnungen (``person_fest``) werden nie verändert.
+"""
 from __future__ import annotations
 
 import numpy as np
 
 from .datenbank import Datenbank, blob_zu_vektor
+from .modelle import GESICHT_KENNUNG
 
-# SFace: gleiche Person meist ab Kosinus-Ähnlichkeit ~0,36
-SUCH_SCHWELLE = 0.36
+# Kosinus-Ähnlichkeit für ArcFace (w600k_r50). Gemessen: gleiche Person meist 0,55–0,9,
+# verschiedene Personen fast immer unter 0,2.
+STANDARD = {
+    "gruppe": 0.50,        # Kante im Graphen: zwei Gesichter zeigen dieselbe Person
+    "zuordnen": 0.45,      # Gesicht -> Personenzentrum (gute Gesichter)
+    "zuordnen_schwach": 0.55,  # dasselbe für unscharfe/kleine/seitliche Gesichter
+    "abstand": 0.08,       # so viel besser als die zweitbeste Person muss es passen
+    "bleiben": 0.35,       # darunter fliegt ein automatisch zugeordnetes Gesicht aus einer Person
+    "suche": 0.40,         # Suche per Referenzfoto
+    "min_qualitaet": 0.35,  # ab hier darf ein Gesicht neue Gruppen bilden
+}
+# alter Name des Werts, als die Grenze noch fürs alte Modell (SFace) galt
+SUCH_SCHWELLE = STANDARD["suche"]
 
 
-def _summen(db: Datenbank) -> dict[int, np.ndarray]:
-    """Summe der Gesichtsvektoren je Person (nicht normiert, damit neue Gesichter richtig gewichtet werden)."""
-    summen: dict[int, np.ndarray] = {}
-    for z in db.abfrage("SELECT person_id, vektor FROM gesichter WHERE person_id IS NOT NULL"):
-        v = blob_zu_vektor(z["vektor"])
-        summen[z["person_id"]] = summen.get(z["person_id"], 0) + v
-    return summen
-
-
-def _zentren(db: Datenbank) -> tuple[list[int], np.ndarray]:
-    summen = _summen(db)
-    if not summen:
-        return [], np.zeros((0, 128), dtype=np.float32)
-    ids = list(summen)
-    return ids, np.stack([_norm(summen[i]) for i in ids])
+def schwellen(einstellungen: dict | None = None) -> dict:
+    s = dict(STANDARD)
+    for k, v in ((einstellungen or {}).get("gesichter") or {}).items():
+        if k in s and isinstance(v, (int, float)):
+            s[k] = float(v)
+    return s
 
 
 def _norm(v: np.ndarray) -> np.ndarray:
-    return v / (np.linalg.norm(v) + 1e-9)
+    return v / (np.linalg.norm(v, axis=-1, keepdims=True) + 1e-9)
 
 
-def neue_gesichter_zuordnen(db: Datenbank, schwelle: float = 0.40, min_score: float = 0.9) -> int:
-    """Ordnet Gesichter ohne Person der ähnlichsten Person zu oder legt neue Gruppen an.
+# ------------------------------------------------------------------ Modellwechsel
 
-    Einfaches, schrittweises Verfahren: ausreichend für einige zehntausend Gesichter.
-    Nur gut erkannte Gesichter (score) bilden neue Gruppen, damit nicht jede
-    unscharfe Hintergrundperson eine eigene Gruppe wird."""
-    offen = db.abfrage("SELECT id, bild_id, vektor, score FROM gesichter WHERE person_id IS NULL "
-                       "ORDER BY score DESC")
-    if not offen:
+def modellwechsel_pruefen(db: Datenbank, kennung: str = GESICHT_KENNUNG) -> int:
+    """Wurden Gesichter mit einem anderen Modell berechnet, nur den Gesichtsschritt neu einplanen.
+
+    Bildinhalt, Text und Beschreibungen bleiben. Die alten Gesichter (und ihre Personen) bleiben
+    bis zur Neuberechnung des jeweiligen Bildes sichtbar. Liefert die Zahl eingeplanter Bilder."""
+    r = db.eins("SELECT wert FROM meta WHERE schluessel='gesicht_modell'")
+    if r and r["wert"] == kennung:
         return 0
-    summen = _summen(db)
-    ids = list(summen)
-    mat = np.stack([_norm(summen[i]) for i in ids]) if ids else np.zeros((0, 128), dtype=np.float32)
-    zuordnung = []
-    for g in offen:
-        v = blob_zu_vektor(g["vektor"])
-        if len(ids):
-            sims = mat @ v
-            j = int(np.argmax(sims))
-            if sims[j] >= schwelle:
-                pid = ids[j]
-                zuordnung.append((pid, g["id"]))
-                summen[pid] = summen[pid] + v
-                mat[j] = _norm(summen[pid])
-                continue
-        if (g["score"] or 0) < min_score:
-            continue
-        with db.verbindung() as con:
-            pid = con.execute("INSERT INTO personen (name) VALUES (NULL)").lastrowid
-        ids.append(pid)
-        summen[pid] = v.copy()
-        mat = np.vstack([mat, _norm(v)[None, :]]) if len(mat) else _norm(v)[None, :]
-        zuordnung.append((pid, g["id"]))
-    with db.verbindung() as con:
-        con.executemany("UPDATE gesichter SET person_id=? WHERE id=?", zuordnung)
-    # benannte Personen sollen sofort über die Textsuche gefunden werden
-    gesicht_bild = {g["id"]: g["bild_id"] for g in offen}
-    db.suchtext_aktualisieren_viele(gesicht_bild[gid] for _, gid in zuordnung)
-    return len(zuordnung)
+    with db.verbindung() as v:
+        n = v.execute("UPDATE bilder SET schritt_gesichter=0 WHERE schritt_gesichter=1").rowcount
+        v.execute("INSERT OR REPLACE INTO meta VALUES ('gesicht_modell', ?)", (kennung,))
+    return n
 
+
+def _iou(a, b) -> float:
+    x1, y1 = max(a[0], b[0]), max(a[1], b[1])
+    x2, y2 = min(a[0] + a[2], b[0] + b[2]), min(a[1] + a[3], b[1] + b[3])
+    schnitt = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    return schnitt / (a[2] * a[3] + b[2] * b[3] - schnitt + 1e-9)
+
+
+def uebernahme_finden(alte: list[dict], neue_boxen: list[tuple]) -> list[dict | None]:
+    """Für jede neue Box das alte Gesicht an derselben Stelle (oder None).
+
+    So bleiben Namen, Korrekturen und "kein Gesicht"-Markierungen erhalten, wenn ein Bild neu
+    analysiert wird."""
+    paare = sorted(((_iou((a["x"], a["y"], a["w"], a["h"]), b), i, j)
+                    for i, b in enumerate(neue_boxen) for j, a in enumerate(alte)), reverse=True)
+    erg: list[dict | None] = [None] * len(neue_boxen)
+    benutzt = set()
+    for iou, i, j in paare:
+        if iou < 0.3:
+            break
+        if erg[i] is None and j not in benutzt:
+            erg[i] = alte[j]
+            benutzt.add(j)
+    return erg
+
+
+# ------------------------------------------------------------------ Clustering
+
+def _nachbarn(mat: np.ndarray, schwelle: float, k: int = 30, block: int = 1024):
+    """Für jedes Gesicht die bis zu k ähnlichsten anderen über der Schwelle: Liste von (j, sim)."""
+    n = len(mat)
+    erg: list[list[tuple[int, float]]] = [[] for _ in range(n)]
+    for s in range(0, n, block):
+        sims = mat[s:s + block] @ mat.T
+        for r in range(len(sims)):
+            sims[r, s + r] = -1
+        kk = min(k, n - 1)
+        if kk <= 0:
+            break
+        top = np.argpartition(-sims, kk - 1, axis=1)[:, :kk]
+        for r in range(len(sims)):
+            js = top[r][sims[r, top[r]] >= schwelle]
+            erg[s + r] = [(int(j), float(sims[r, j])) for j in js]
+    return erg
+
+
+def chinese_whispers(nachbarn, runden: int = 20, seed: int = 0) -> np.ndarray:
+    """Graph-Clustering: jeder Knoten übernimmt die Gruppe mit dem höchsten Kantengewicht unter
+    seinen Nachbarn. Neigt weniger als einfache Zusammenhangskomponenten dazu, zwei Personen über
+    ein einzelnes zweideutiges Gesicht zu verketten."""
+    n = len(nachbarn)
+    label = np.arange(n)
+    rng = np.random.default_rng(seed)
+    # Kanten symmetrisch machen
+    sym: list[dict[int, float]] = [dict() for _ in range(n)]
+    for i, liste in enumerate(nachbarn):
+        for j, w in liste:
+            sym[i][j] = max(sym[i].get(j, 0.0), w)
+            sym[j][i] = max(sym[j].get(i, 0.0), w)
+    for _ in range(runden):
+        geaendert = 0
+        for i in rng.permutation(n):
+            if not sym[i]:
+                continue
+            gewicht: dict[int, float] = {}
+            for j, w in sym[i].items():
+                gewicht[label[j]] = gewicht.get(label[j], 0.0) + w
+            bestes = max(gewicht.items(), key=lambda kv: (kv[1], -kv[0]))[0]
+            if bestes != label[i]:
+                label[i] = bestes
+                geaendert += 1
+        if not geaendert:
+            break
+    return label
+
+
+def cluster(mat: np.ndarray, schwelle: float, min_groesse: int = 2) -> list[list[int]]:
+    """Gruppen (Indizes in mat) mit mindestens min_groesse Gesichtern, größte zuerst.
+    Gesichter, die nicht zum Zentrum ihrer Gruppe passen, werden aussortiert."""
+    if not len(mat):
+        return []
+    label = chinese_whispers(_nachbarn(mat, schwelle))
+    gruppen: dict[int, list[int]] = {}
+    for i, l in enumerate(label):
+        gruppen.setdefault(int(l), []).append(i)
+    erg = []
+    for idx in gruppen.values():
+        if len(idx) < min_groesse:
+            continue
+        zentrum = _norm(mat[idx].mean(0))
+        idx = [i for i in idx if float(mat[i] @ zentrum) >= schwelle - 0.1]
+        if len(idx) >= min_groesse:
+            erg.append(idx)
+    return sorted(erg, key=len, reverse=True)
+
+
+# ------------------------------------------------------------------ Gruppieren
+
+def _lade(db: Datenbank):
+    zeilen = db.abfrage("SELECT id, bild_id, person_id, person_fest, COALESCE(qualitaet, score, 0) AS q, vektor "
+                        "FROM gesichter WHERE ignoriert=0 AND modell=?", (GESICHT_KENNUNG,))
+    if not zeilen:
+        return None
+    return {
+        "id": np.array([z["id"] for z in zeilen], dtype=np.int64),
+        "bild": np.array([z["bild_id"] for z in zeilen], dtype=np.int64),
+        "person": np.array([z["person_id"] or 0 for z in zeilen], dtype=np.int64),
+        "fest": np.array([bool(z["person_fest"]) for z in zeilen]),
+        "q": np.array([z["q"] for z in zeilen], dtype=np.float32),
+        "mat": _norm(np.stack([blob_zu_vektor(z["vektor"]) for z in zeilen])),
+    }
+
+
+def _abgelehnt(db: Datenbank) -> dict[int, set[int]]:
+    erg: dict[int, set[int]] = {}
+    for z in db.abfrage("SELECT gesicht_id, person_id FROM gesicht_abgelehnt"):
+        erg.setdefault(z["gesicht_id"], set()).add(z["person_id"])
+    return erg
+
+
+def _kern(mat: np.ndarray, fest: np.ndarray, s: dict) -> np.ndarray:
+    """Maske der Gesichter einer Person, die zu ihrem Kern passen.
+
+    Kern = bestätigte Gesichter, sonst die größte Untergruppe. So bleibt "Marlena" Marlena, auch
+    wenn das alte Modell ein paar fremde Gesichter dazugepackt hat."""
+    if fest.any():
+        zentrum = _norm(mat[fest].mean(0))
+    else:
+        gruppen = cluster(mat, s["gruppe"], min_groesse=1) if len(mat) > 1 else [[0]]
+        zentrum = _norm(mat[gruppen[0]].mean(0)) if gruppen else _norm(mat.mean(0))
+    return fest | (mat @ zentrum >= s["bleiben"])
+
+
+def neu_gruppieren(db: Datenbank, einstellungen: dict | None = None) -> dict:
+    """Ordnet alle Gesichter (des aktuellen Modells) Personen zu. Siehe Modulbeschreibung."""
+    s = schwellen(einstellungen)
+    d = _lade(db)
+    if d is None:
+        return {"zugeordnet": 0, "personen": 0}
+    mat, person, fest, q = d["mat"], d["person"].copy(), d["fest"], d["q"]
+    vorher = d["person"].copy()
+    abgelehnt = _abgelehnt(db)
+    index_von = {int(g): i for i, g in enumerate(d["id"])}
+
+    bleibende = {z["id"] for z in db.abfrage("SELECT id FROM personen WHERE fest=1 OR name IS NOT NULL")}
+    # 1./2. unbearbeitete Gruppen auflösen, bearbeitete bereinigen
+    for i in np.where(~fest & (person > 0))[0]:
+        if int(person[i]) not in bleibende:
+            person[i] = 0
+    zentren: dict[int, np.ndarray] = {}
+    for pid in bleibende:
+        idx = np.where(person == pid)[0]
+        if not len(idx):
+            continue
+        ok = _kern(mat[idx], fest[idx], s)
+        person[idx[~ok]] = 0
+        zentren[pid] = _norm(mat[idx[ok]].mean(0))
+
+    # Negativbeispiele: Gesichter, die der Nutzer bei einer Person abgelehnt hat
+    negativ: dict[int, list[int]] = {}
+    for gid, pids in abgelehnt.items():
+        if gid in index_von:
+            for pid in pids:
+                negativ.setdefault(pid, []).append(index_von[gid])
+
+    def zuordnen(kandidaten: np.ndarray, zentren: dict[int, np.ndarray]) -> None:
+        if not zentren or not len(kandidaten):
+            return
+        pids = list(zentren)
+        zmat = np.stack([zentren[p] for p in pids])
+        sims = mat[kandidaten] @ zmat.T
+        for r, i in enumerate(kandidaten):
+            gid = int(d["id"][i])
+            zeile = sims[r].copy()
+            for c, pid in enumerate(pids):
+                if pid in abgelehnt.get(gid, ()):
+                    zeile[c] = -1
+            reihenfolge = np.argsort(-zeile)
+            beste = reihenfolge[0]
+            zweite = zeile[reihenfolge[1]] if len(reihenfolge) > 1 else -1
+            grenze = s["zuordnen"] if q[i] >= s["min_qualitaet"] else s["zuordnen_schwach"]
+            if zeile[beste] < grenze or zeile[beste] - zweite < s["abstand"]:
+                continue
+            pid = pids[beste]
+            neg = negativ.get(pid)
+            # ähnelt es einem abgelehnten Gesicht mehr als der Person selbst: nicht zuordnen
+            if neg and float((mat[neg] @ mat[i]).max()) >= zeile[beste]:
+                continue
+            person[i] = pid
+
+    # 3. freie Gesichter zu bekannten Personen
+    zuordnen(np.where((person == 0) & ~fest)[0], zentren)
+
+    # 4. Rest clustern: nur gute Gesichter bilden neue Gruppen
+    frei = np.where((person == 0) & ~fest & (q >= s["min_qualitaet"]))[0]
+    neue: list[np.ndarray] = [frei[g] for g in cluster(mat[frei], s["gruppe"])]
+    # bestehende automatische Gruppen-IDs weiterverwenden, wenn eine neue Gruppe überwiegend aus
+    # ihnen besteht: so springen Gruppen beim Neugruppieren nicht ohne Grund um
+    benutzt: set[int] = set(bleibende)
+    neue_ids: list[int] = []
+    for idx in neue:
+        alt = [int(p) for p in vorher[idx] if p and int(p) not in benutzt]
+        pid = max(set(alt), key=alt.count) if alt else 0
+        if pid and alt.count(pid) * 2 < len(idx):
+            pid = 0
+        neue_ids.append(pid)
+        if pid:
+            benutzt.add(pid)
+    with db.verbindung() as v:
+        for k, (idx, pid) in enumerate(zip(neue, neue_ids)):
+            if not pid:
+                pid = v.execute("INSERT INTO personen (name) VALUES (NULL)").lastrowid
+                neue_ids[k] = pid
+            person[idx] = pid
+    # schwache Gesichter dürfen sich neuen Gruppen anschließen
+    neue_zentren = {pid: _norm(mat[idx].mean(0)) for idx, pid in zip(neue, neue_ids)}
+    zuordnen(np.where((person == 0) & ~fest)[0], neue_zentren)
+
+    # speichern
+    geaendert = np.where(person != vorher)[0]
+    with db.verbindung() as v:
+        v.executemany("UPDATE gesichter SET person_id=? WHERE id=?",
+                      [(int(person[i]) or None, int(d["id"][i])) for i in geaendert])
+        # leere, unbenannte Personen entfernen (Gesichter alter Modelle zählen noch mit)
+        v.execute("DELETE FROM personen WHERE name IS NULL AND id NOT IN "
+                  "(SELECT DISTINCT person_id FROM gesichter WHERE person_id IS NOT NULL)")
+    db.suchtext_aktualisieren_viele({int(d["bild"][i]) for i in geaendert})
+    return {"zugeordnet": int((person > 0).sum()), "geaendert": int(len(geaendert)),
+            "personen": int(len(set(person[person > 0].tolist())))}
+
+
+def neue_gesichter_zuordnen(db: Datenbank, einstellungen: dict | None = None) -> int:
+    """Nach einem Indexlauf: alles neu gruppieren (schnell genug für einige zehntausend Gesichter)."""
+    return neu_gruppieren(db, einstellungen)["zugeordnet"]
+
+
+# ------------------------------------------------------------------ Anzeigen
 
 def _bilder_von(db: Datenbank, person_ids) -> list[int]:
     person_ids = list(person_ids)
@@ -83,15 +311,41 @@ def _bilder_von(db: Datenbank, person_ids) -> list[int]:
 def personen_liste(db: Datenbank, min_anzahl: int = 2) -> list[dict]:
     zeilen = db.abfrage("""
         SELECT p.id, p.name, COUNT(DISTINCT g.bild_id) AS bilder,
-               (SELECT g2.id FROM gesichter g2 WHERE g2.person_id = p.id ORDER BY g2.score DESC, g2.w DESC LIMIT 1)
+               (SELECT g2.id FROM gesichter g2 WHERE g2.person_id = p.id AND g2.ignoriert = 0
+                ORDER BY g2.person_fest DESC, COALESCE(g2.qualitaet, 0) DESC, g2.score DESC, g2.w DESC LIMIT 1)
                AS titel_gesicht
-        FROM personen p JOIN gesichter g ON g.person_id = p.id
+        FROM personen p JOIN gesichter g ON g.person_id = p.id AND g.ignoriert = 0
         GROUP BY p.id HAVING bilder >= ? OR p.name IS NOT NULL
-        ORDER BY (p.name IS NULL), bilder DESC""", (min_anzahl,))
+        ORDER BY (p.name IS NULL), p.name COLLATE NOCASE, bilder DESC""", (min_anzahl,))
     return [dict(z) for z in zeilen]
 
 
-def umbenennen(db: Datenbank, person_id: int, name: str) -> None:
+def person_gesichter(db: Datenbank, person_id: int, limit: int = 600) -> list[dict]:
+    """Gesichter einer Person, die unsichersten zuerst (dort stecken die Fehler)."""
+    zeilen = db.abfrage("SELECT id, bild_id, person_fest, modell, vektor FROM gesichter "
+                        "WHERE person_id=? AND ignoriert=0", (person_id,))
+    if not zeilen:
+        return []
+    aktuell = [z for z in zeilen if z["modell"] == GESICHT_KENNUNG]
+    sims = {}
+    if aktuell:
+        mat = _norm(np.stack([blob_zu_vektor(z["vektor"]) for z in aktuell]))
+        fest = np.array([bool(z["person_fest"]) for z in aktuell])
+        zentrum = _norm((mat[fest] if fest.any() else mat).mean(0))
+        sims = {z["id"]: float(s) for z, s in zip(aktuell, mat @ zentrum)}
+    erg = [{"id": z["id"], "bild_id": z["bild_id"], "fest": bool(z["person_fest"]),
+            "aehnlichkeit": round(sims[z["id"]], 3) if z["id"] in sims else None} for z in zeilen]
+    erg.sort(key=lambda g: (g["fest"], g["aehnlichkeit"] if g["aehnlichkeit"] is not None else -2))
+    return erg[:limit]
+
+
+# ------------------------------------------------------------------ Korrekturen
+
+def _festhalten(con, person_id: int) -> None:
+    con.execute("UPDATE personen SET fest=1 WHERE id=?", (person_id,))
+
+
+def umbenennen(db: Datenbank, person_id: int, name: str) -> int:
     name = name.strip() or None
     with db.verbindung() as con:
         # gibt es schon eine Person mit diesem Namen: zusammenführen
@@ -99,12 +353,15 @@ def umbenennen(db: Datenbank, person_id: int, name: str) -> None:
             if name else None
         if vorhanden:
             con.execute("UPDATE gesichter SET person_id=? WHERE person_id=?", (vorhanden[0], person_id))
+            con.execute("UPDATE OR IGNORE gesicht_abgelehnt SET person_id=? WHERE person_id=?",
+                        (vorhanden[0], person_id))
             con.execute("DELETE FROM personen WHERE id=?", (person_id,))
             person_id = vorhanden[0]
         else:
             con.execute("UPDATE personen SET name=? WHERE id=?", (name, person_id))
-    for z in db.abfrage("SELECT DISTINCT bild_id FROM gesichter WHERE person_id=?", (person_id,)):
-        db.suchtext_aktualisieren(z["bild_id"])
+        _festhalten(con, person_id)
+    db.suchtext_aktualisieren_viele(_bilder_von(db, [person_id]))
+    return person_id
 
 
 def zusammenfuehren(db: Datenbank, ziel_id: int, quell_ids: list[int]) -> None:
@@ -112,29 +369,80 @@ def zusammenfuehren(db: Datenbank, ziel_id: int, quell_ids: list[int]) -> None:
         for q in quell_ids:
             if q != ziel_id:
                 con.execute("UPDATE gesichter SET person_id=? WHERE person_id=?", (ziel_id, q))
+                con.execute("UPDATE OR IGNORE gesicht_abgelehnt SET person_id=? WHERE person_id=?", (ziel_id, q))
                 con.execute("DELETE FROM personen WHERE id=?", (q,))
+        _festhalten(con, ziel_id)
     db.suchtext_aktualisieren_viele(_bilder_von(db, [ziel_id]))  # Name gilt jetzt auch für diese Bilder
 
 
-def gesicht_entfernen(db: Datenbank, gesicht_id: int) -> None:
-    """Gesicht passt nicht zur Person: in eine eigene Gruppe verschieben."""
-    r = db.eins("SELECT bild_id FROM gesichter WHERE id=?", (gesicht_id,))
-    if not r:
-        return
-    with db.verbindung() as con:
-        pid = con.execute("INSERT INTO personen (name) VALUES (NULL)").lastrowid
-        con.execute("UPDATE gesichter SET person_id=?, person_fest=1 WHERE id=?", (pid, gesicht_id))
-    db.suchtext_aktualisieren(r["bild_id"])  # alter Name passt nicht mehr
+def _bilder_der_gesichter(db: Datenbank, gesicht_ids: list[int]) -> list[int]:
+    if not gesicht_ids:
+        return []
+    return [z["bild_id"] for z in db.abfrage(
+        f"SELECT DISTINCT bild_id FROM gesichter WHERE id IN ({','.join('?' * len(gesicht_ids))})", gesicht_ids)]
 
+
+def nicht_diese_person(db: Datenbank, gesicht_ids: list[int]) -> None:
+    """Gesichter passen nicht zu ihrer Person: herausnehmen und merken, damit sie (und sehr ähnliche
+    Gesichter) dieser Person nicht wieder zugeordnet werden."""
+    bilder = _bilder_der_gesichter(db, gesicht_ids)
+    with db.verbindung() as con:
+        for gid in gesicht_ids:
+            r = con.execute("SELECT person_id FROM gesichter WHERE id=?", (gid,)).fetchone()
+            if not r or not r[0]:
+                continue
+            con.execute("INSERT OR IGNORE INTO gesicht_abgelehnt VALUES (?,?)", (gid, r[0]))
+            con.execute("UPDATE gesichter SET person_id=NULL, person_fest=0 WHERE id=?", (gid,))
+            _festhalten(con, r[0])
+    db.suchtext_aktualisieren_viele(bilder)  # alter Name passt nicht mehr
+
+
+def gesicht_entfernen(db: Datenbank, gesicht_id: int) -> None:
+    """Älterer Name für "Nicht diese Person"."""
+    nicht_diese_person(db, [gesicht_id])
+
+
+def kein_gesicht(db: Datenbank, gesicht_ids: list[int]) -> None:
+    """Fehlerkennung (Muster, Statue, Plakat ...): wird ignoriert, auch beim Neuanalysieren."""
+    bilder = _bilder_der_gesichter(db, gesicht_ids)
+    with db.verbindung() as con:
+        for gid in gesicht_ids:
+            r = con.execute("SELECT person_id FROM gesichter WHERE id=?", (gid,)).fetchone()
+            if r and r[0]:
+                _festhalten(con, r[0])
+            con.execute("UPDATE gesichter SET ignoriert=1, person_id=NULL, person_fest=0 WHERE id=?", (gid,))
+    db.suchtext_aktualisieren_viele(bilder)
+
+
+def zuweisen(db: Datenbank, gesicht_ids: list[int], person_id: int | None = None, name: str = "") -> int:
+    """Gesichter fest einer Person zuordnen (vorhandene Person oder neue mit Namen). Liefert die Person."""
+    bilder = _bilder_der_gesichter(db, gesicht_ids)
+    name = (name or "").strip()
+    with db.verbindung() as con:
+        if not person_id and name:
+            r = con.execute("SELECT id FROM personen WHERE name=?", (name,)).fetchone()
+            person_id = r[0] if r else con.execute("INSERT INTO personen (name) VALUES (?)", (name,)).lastrowid
+        if not person_id:
+            person_id = con.execute("INSERT INTO personen (name) VALUES (NULL)").lastrowid
+        for gid in gesicht_ids:
+            con.execute("UPDATE gesichter SET person_id=?, person_fest=1, ignoriert=0 WHERE id=?", (person_id, gid))
+            con.execute("DELETE FROM gesicht_abgelehnt WHERE gesicht_id=? AND person_id=?", (gid, person_id))
+        _festhalten(con, person_id)
+        con.execute("DELETE FROM personen WHERE name IS NULL AND fest=0 AND id NOT IN "
+                    "(SELECT DISTINCT person_id FROM gesichter WHERE person_id IS NOT NULL)")
+    db.suchtext_aktualisieren_viele(bilder)
+    return person_id
+
+
+# ------------------------------------------------------------------ Suche
 
 def aehnliche_gesichter(db: Datenbank, referenz: np.ndarray, schwelle: float = SUCH_SCHWELLE,
                         limit: int = 2000) -> list[tuple[int, float]]:
     """Bilder (bild_id, Ähnlichkeit), auf denen ein Gesicht der Referenz ähnelt. Beste zuerst."""
-    gids, bids, mat = db.gesicht_matrix()
-    if not len(gids):
+    gids, bids, mat = db.gesicht_matrix(GESICHT_KENNUNG)
+    if not len(gids) or mat.shape[1] != len(referenz):
         return []
-    referenz = referenz / (np.linalg.norm(referenz) + 1e-9)
-    sims = mat @ referenz
+    sims = _norm(mat) @ _norm(np.asarray(referenz, dtype=np.float32))
     beste: dict[int, float] = {}
     for b, s in zip(bids, sims):
         if s >= schwelle and s > beste.get(int(b), -1):

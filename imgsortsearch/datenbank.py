@@ -63,6 +63,12 @@ CREATE TABLE IF NOT EXISTS bild_zusatz (
     an INTEGER NOT NULL,
     PRIMARY KEY (bild_id, kategorie)
 );
+-- "Nicht diese Person": das Gesicht wird dieser Person nie wieder automatisch zugeordnet
+CREATE TABLE IF NOT EXISTS gesicht_abgelehnt (
+    gesicht_id INTEGER NOT NULL REFERENCES gesichter(id) ON DELETE CASCADE,
+    person_id INTEGER NOT NULL REFERENCES personen(id) ON DELETE CASCADE,
+    PRIMARY KEY (gesicht_id, person_id)
+);
 CREATE TABLE IF NOT EXISTS protokolle (
     id INTEGER PRIMARY KEY,
     datei TEXT, zeit TEXT, beschreibung TEXT, rueckgaengig INTEGER DEFAULT 0
@@ -99,6 +105,13 @@ class Datenbank:
             for spalte in ("zusatz_auto", "zusatz"):  # zusatz: wirksame Liste als ",Natur,Familie,"
                 if spalte not in spalten:
                     v.execute(f"ALTER TABLE bilder ADD COLUMN {spalte} TEXT DEFAULT ''")
+            spalten = {r[1] for r in v.execute("PRAGMA table_info(gesichter)")}
+            for spalte, typ in (("qualitaet", "REAL"), ("modell", "TEXT"), ("ignoriert", "INTEGER DEFAULT 0")):
+                if spalte not in spalten:  # ignoriert: vom Nutzer als "kein Gesicht" markiert
+                    v.execute(f"ALTER TABLE gesichter ADD COLUMN {spalte} {typ}")
+            if "fest" not in {r[1] for r in v.execute("PRAGMA table_info(personen)")}:
+                # fest: vom Nutzer bearbeitet (benannt, zusammengeführt, korrigiert), wird nie aufgelöst
+                v.execute("ALTER TABLE personen ADD COLUMN fest INTEGER DEFAULT 0")
 
     def _con(self) -> sqlite3.Connection:
         con = getattr(self._lokal, "con", None)
@@ -238,11 +251,15 @@ class Datenbank:
             vorhanden.update(dict(zip(fehlend, neu.astype(np.float32))))
         return np.stack([vorhanden[t] for t in texte])
 
-    def gesicht_matrix(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """(gesicht_ids, bild_ids, Matrix N x 128)."""
-        zeilen = self.abfrage("SELECT id, bild_id, vektor FROM gesichter")
+    def gesicht_matrix(self, modell: str | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """(gesicht_ids, bild_ids, Matrix N x D) aller echten Gesichter des angegebenen Modells."""
+        bed, par = "ignoriert=0", []
+        if modell is not None:
+            bed += " AND modell=?"
+            par.append(modell)
+        zeilen = self.abfrage(f"SELECT id, bild_id, vektor FROM gesichter WHERE {bed}", par)
         if not zeilen:
-            return (np.zeros(0, dtype=np.int64),) * 2 + (np.zeros((0, 128), dtype=np.float32),)
+            return (np.zeros(0, dtype=np.int64),) * 2 + (np.zeros((0, 0), dtype=np.float32),)
         return (np.array([z["id"] for z in zeilen], dtype=np.int64),
                 np.array([z["bild_id"] for z in zeilen], dtype=np.int64),
                 np.stack([blob_zu_vektor(z["vektor"]) for z in zeilen]))

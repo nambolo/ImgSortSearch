@@ -9,9 +9,8 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from conftest import D, mache_bild
-from imgsortsearch import indexer, personen, sortieren
-from imgsortsearch.datenbank import vektor_zu_blob
+from conftest import mache_bild
+from imgsortsearch import indexer, sortieren
 from imgsortsearch.klassifizierung import in_arbeitszeit, regel_trifft
 from imgsortsearch.server import erstelle_app
 
@@ -152,39 +151,16 @@ def test_zusammenfuehren_und_entfernen_aktualisieren_suche(client, zustand):
     pid = client.get("/api/personen").json()["personen"][0]["id"]
     client.post(f"/api/personen/{pid}/name", json={"name": "Anna"})
     gesichter = client.get(f"/api/personen/{pid}/gesichter").json()["gesichter"]
-    # ein Gesicht abspalten und unbenannt lassen: Bild darf nicht mehr unter "Anna" kommen
+    # "Nicht diese Person": Bild darf nicht mehr unter "Anna" kommen
     client.post(f"/api/gesicht/{gesichter[0]['id']}/entfernen")
     assert len(namen(client, q="anna", art="text")) == 1
-    neu = zustand.db.eins("SELECT person_id FROM gesichter WHERE id=?", (gesichter[0]["id"],))["person_id"]
-    # wieder zusammenführen: beide Bilder unter "Anna"
-    client.post("/api/personen/zusammenfuehren", json={"ziel": pid, "quellen": [neu]})
+    assert zustand.db.eins("SELECT person_id FROM gesichter WHERE id=?", (gesichter[0]["id"],))["person_id"] is None
+    # Neu gruppieren ordnet es Anna nicht wieder zu, obwohl es gleich aussieht
+    client.post("/api/personen/neu-gruppieren")
+    assert len(namen(client, q="anna", art="text")) == 1
+    # wieder von Hand zuweisen: beide Bilder unter "Anna"
+    client.post("/api/gesichter/zuweisen", json={"gesichter": [gesichter[0]["id"]], "person": pid})
     assert set(namen(client, q="anna", art="text")) == {"c.jpg", "d.jpg"}
-
-
-def _einheit(*komponenten):
-    v = np.zeros(D, dtype=np.float32)
-    v[:len(komponenten)] = komponenten
-    return v / np.linalg.norm(v)
-
-
-def test_neues_gesicht_verschiebt_personenzentrum_nur_anteilig(heim):
-    """Vorher zählte ein neues Gesicht so viel wie alle bisherigen zusammen."""
-    from imgsortsearch.datenbank import Datenbank
-    db = Datenbank(heim / "t.sqlite")
-    a = _einheit(1)
-    b = _einheit(np.cos(np.radians(60)), np.sin(np.radians(60)))
-    c = _einheit(np.cos(np.radians(80)), np.sin(np.radians(80)))
-    with db.verbindung() as v:
-        bid = v.execute("INSERT INTO bilder (pfad) VALUES ('x')").lastrowid
-        pid = v.execute("INSERT INTO personen (name) VALUES ('Anna')").lastrowid
-        for _ in range(9):
-            v.execute("INSERT INTO gesichter (bild_id, score, vektor, person_id) VALUES (?,?,?,?)",
-                      (bid, 0.99, vektor_zu_blob(a), pid))
-        v.execute("INSERT INTO gesichter (bild_id, score, vektor) VALUES (?,?,?)", (bid, 0.99, vektor_zu_blob(b)))
-        gc = v.execute("INSERT INTO gesichter (bild_id, score, vektor) VALUES (?,?,?)",
-                       (bid, 0.95, vektor_zu_blob(c))).lastrowid
-    personen.neue_gesichter_zuordnen(db, schwelle=0.40)
-    assert db.eins("SELECT person_id FROM gesichter WHERE id=?", (gc,))["person_id"] != pid
 
 
 # ------------------------------------------------------------------ Einordnen
