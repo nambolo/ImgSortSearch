@@ -42,7 +42,14 @@ Deinstallieren: den Ordner löschen.
 (oder `nvidia`, `cpu`). In den Einstellungen kann man jederzeit auf „Nur Prozessor“ umstellen. Kann die
 Grafikkarte einen Rechenschritt nicht, wechselt das Programm von selbst auf den Prozessor und zeigt das an.
 Bildmodell, Beschreibungen und Übersetzung laufen auf der Grafikkarte; Gesichter und Texterkennung auf dem
-Prozessor (die sind auch so schnell).
+Prozessor (die sind auch so schnell). Sind Prozessorgrafik und Grafikkarte beide aktiv, nimmt DirectML die Grafikkarte.
+
+Öffnet sich statt des eigenen Fensters der Browser, fehlt die „Microsoft Edge WebView2 Runtime“ (bei Windows 10/11
+normalerweise dabei, sonst kostenlos bei microsoft.com). Das Programm funktioniert im Browser genauso.
+
+Papierkorb: Nur auf Festplatten (auch externen USB-Festplatten). Auf USB-Sticks, Speicherkarten und Netzlaufwerken
+gibt es keinen Papierkorb; dort bleibt die Datei liegen (mit Hinweis), statt endgültig gelöscht zu werden. Für solche
+Laufwerke beim Aussortieren den Quarantäne-Ordner wählen.
 
 ## Erste Schritte
 
