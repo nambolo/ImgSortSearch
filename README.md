@@ -19,6 +19,8 @@ Lokales Programm für Windows, das ein großes Foto-Backup durchsuchbar macht un
    Die Grafikkarte wird erkannt und genutzt (siehe unten).
 3. **`start.bat`** doppelklicken. Das Programm öffnet sich in einem eigenen Fenster.
 
+Hat exiftool bei der Installation nicht geklappt: **`exiftool-nachladen.bat`** doppelklicken. Das lädt nur exiftool, alles andere bleibt.
+
 Deinstallieren: den Ordner löschen.
 
 ## Grafikkarte
