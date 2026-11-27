@@ -108,3 +108,41 @@ def test_einbetten_viele_dateien_ein_exiftool(tmp_path):
     # rückgängig stellt die Originale wieder her
     sortieren.rueckgaengig(Path(erg["protokoll"]), echt=True)
     assert not list(q.glob("*_original"))
+
+
+def test_ordner_entfernen_mit_abfrage(client, zustand, heim):
+    """Beim Entfernen eines Bilder-Ordners entscheidet man, ob seine Bilder im Index bleiben."""
+    andere = heim / "zweiter"
+    mache_bild(andere / "x.jpg", "iPhone 13", "2024:03:12 10:15:00", farbe=(20, 20, 220))
+    zustand.e.aktualisieren({"quellen": zustand.e["quellen"] + [str(andere)]})
+    client.post("/api/index/start")
+    warte(client)
+    assert client.get("/api/status").json()["gesamt"] == 6
+    assert client.get("/api/quellen/anzahl", params={"pfad": str(andere)}).json()["anzahl"] == 1
+
+    # behalten: Ordner ist ausgetragen, Bild bleibt im Index
+    r = client.post("/api/quellen/entfernen", json={"pfad": str(andere), "aus_index": False}).json()
+    assert str(andere) not in r["einstellungen"]["quellen"] and r["entfernt"] == 0
+    assert client.get("/api/status").json()["gesamt"] == 6
+
+    # entfernen: Bilder, Gesichter und leere Personen sind weg, die Datei bleibt
+    backup = zustand.e["quellen"][0]
+    n = client.get("/api/quellen/anzahl", params={"pfad": backup}).json()["anzahl"]
+    assert n == 5
+    r = client.post("/api/quellen/entfernen", json={"pfad": backup, "aus_index": True}).json()
+    assert r["entfernt"] == 5 and r["einstellungen"]["quellen"] == []
+    assert client.get("/api/status").json()["gesamt"] == 1
+    assert (heim / "backup" / "a.jpg").exists()
+    personen = zustand.db.abfrage("SELECT id FROM personen WHERE id NOT IN (SELECT person_id FROM gesichter)")
+    assert not personen
+
+
+def test_ordner_entfernen_laesst_unterordner_einer_anderen_quelle(client, zustand, heim):
+    unter = heim / "backup" / "neu"
+    mache_bild(unter / "e.jpg", "iPhone 13", "2024:05:01 12:00:00")
+    zustand.e.aktualisieren({"quellen": zustand.e["quellen"] + [str(unter)]})
+    client.post("/api/index/start")
+    warte(client)
+    r = client.post("/api/quellen/entfernen", json={"pfad": str(heim / "backup"), "aus_index": True}).json()
+    assert r["entfernt"] == 5  # e.jpg gehört weiter zum eingetragenen Unterordner
+    assert [b["name"] for b in client.get("/api/bilder").json()["bilder"]] == ["e.jpg"]

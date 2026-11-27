@@ -58,6 +58,29 @@ def _unter(pfad: str, ordner: list[str]) -> bool:
     return False
 
 
+def bilder_entfernen(db: Datenbank, ids: list[int]) -> int:
+    """Bilder aus dem Index austragen (mit Gesichtern und Vorschaubildern). Die Dateien bleiben unberührt."""
+    gesicht_ids = []
+    for start in range(0, len(ids), 500):
+        teil = ids[start:start + 500]
+        gesicht_ids += [r["id"] for r in db.abfrage(
+            f"SELECT id FROM gesichter WHERE bild_id IN ({','.join('?' * len(teil))})", teil)]
+    with db.verbindung() as v:
+        v.executemany("DELETE FROM bilder WHERE id=?", [(i,) for i in ids])
+        # Personen ohne Gesichter bleiben sonst als leere Einträge zurück
+        v.execute("DELETE FROM personen WHERE id NOT IN (SELECT DISTINCT person_id FROM gesichter "
+                  "WHERE person_id IS NOT NULL)")
+    caches_entfernen(ids, gesicht_ids)
+    return len(ids)
+
+
+def bilder_im_ordner(db: Datenbank, ordner: str, ausser: list[str] = ()) -> list[int]:
+    """Bilder im Index, die in ``ordner`` liegen, aber in keinem der Ordner aus ``ausser``
+    (z. B. wenn ein anderer Bilder-Ordner darüber oder darunter weiter eingetragen ist)."""
+    return [r["id"] for r in db.abfrage("SELECT id, pfad FROM bilder")
+            if _unter(r["pfad"], [ordner]) and not _unter(r["pfad"], list(ausser))]
+
+
 def vorschau_erzeugen(bild_id: int, img) -> Path:
     p = vorschau_pfad(bild_id)
     klein = img.copy()
@@ -267,14 +290,7 @@ class Indexer:
         vorhanden = {str(p) for p in gefunden}
         weg = [i for pfad, (i, _, _) in bekannt.items() if pfad not in vorhanden and _unter(pfad, erreichbar)]
         if weg:
-            gesicht_ids = []
-            for start in range(0, len(weg), 500):
-                teil = weg[start:start + 500]
-                gesicht_ids += [r["id"] for r in self.db.abfrage(
-                    f"SELECT id FROM gesichter WHERE bild_id IN ({','.join('?' * len(teil))})", teil)]
-            with self.db.verbindung() as v:
-                v.executemany("DELETE FROM bilder WHERE id=?", [(i,) for i in weg])
-            caches_entfernen(weg, gesicht_ids)
+            bilder_entfernen(self.db, weg)
 
         # Kopien, die das Programm selbst in einen Zielordner innerhalb der Quellen gelegt hat,
         # nicht als neue Bilder aufnehmen (sonst ist danach alles doppelt im Index)
