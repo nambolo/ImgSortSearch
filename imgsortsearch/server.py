@@ -77,7 +77,8 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
         offen = z.db.eins("SELECT COUNT(*) AS n FROM bilder WHERE schritt_clip=0 AND fehler IS NULL")["n"]
         return {"index": z.indexer.status, "kategorien": zahlen, "gesamt": sum(zahlen.values()),
                 "offen": offen, "modell_fehler": z.m.fehler, "geraete": z.m.geraete(), "exiftool": shutil.which("exiftool") is not None,
-                "sortieren": z.sortier_status}
+                "sortieren": z.sortier_status,
+                "quellen_fehlen": [q for q in z.e["quellen"] if not Path(q).is_dir()]}
 
     @app.get("/api/einstellungen")
     def einstellungen_lesen():

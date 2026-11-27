@@ -27,3 +27,10 @@ def test_dropfiles_aufbau():
     assert (p_files, wide) == (20, 1)
     liste = daten[20:].decode("utf-16-le")
     assert liste == "C:\\Bilder\\a b.jpg\0D:\\ü.png\0\0"
+
+
+def test_status_meldet_fehlende_bilder_ordner(zustand, heim):
+    c = TestClient(erstelle_app(zustand), headers={"X-ImgSortSearch": "1"})
+    weg = str(heim / "gibt-es-nicht")
+    c.post("/api/einstellungen", json={"quellen": [str(heim / "backup"), weg]})
+    assert c.get("/api/status").json()["quellen_fehlen"] == [weg]
