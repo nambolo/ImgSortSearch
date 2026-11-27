@@ -76,10 +76,19 @@ def _datum(zeile) -> datetime | None:
         return None
 
 
+def _im_zeitfenster(t: time, von: time, bis: time) -> bool:
+    """Auch Fenster über Mitternacht (Nachtschicht 22:00-06:00)."""
+    return von <= t <= bis if von <= bis else (t >= von or t <= bis)
+
+
 def in_arbeitszeit(dt: datetime, az: dict) -> bool:
-    if dt.isoweekday() not in az.get("wochentage", [1, 2, 3, 4, 5]):
+    von, bis = time.fromisoformat(az.get("von", "07:30")), time.fromisoformat(az.get("bis", "17:30"))
+    tag = dt.isoweekday()
+    if von > bis and dt.time() <= bis:  # Nachtschicht nach Mitternacht zählt zum Vortag
+        tag = tag - 1 or 7
+    if tag not in az.get("wochentage", [1, 2, 3, 4, 5]):
         return False
-    return time.fromisoformat(az.get("von", "07:30")) <= dt.time() <= time.fromisoformat(az.get("bis", "17:30"))
+    return _im_zeitfenster(dt.time(), von, bis)
 
 
 def regel_trifft(regel: dict, z: dict) -> bool:
@@ -95,7 +104,10 @@ def regel_trifft(regel: dict, z: dict) -> bool:
             return False
     if "dateiname_regex" in regel:
         n += 1
-        if not re.search(regel["dateiname_regex"], Path(z.get("pfad", "")).name):
+        try:
+            if not re.search(regel["dateiname_regex"], Path(z.get("pfad") or "").name):
+                return False
+        except re.error:  # Tippfehler in der Regel soll nicht das Einordnen aller Bilder abbrechen
             return False
     if "gps" in regel:
         n += 1
@@ -114,7 +126,7 @@ def regel_trifft(regel: dict, z: dict) -> bool:
         if "uhrzeit" in regel:
             n += 1
             von, bis = (time.fromisoformat(s.strip()) for s in regel["uhrzeit"].split("-"))
-            if not von <= dt.time() <= bis:
+            if not _im_zeitfenster(dt.time(), von, bis):
                 return False
     if "mit_gesichtern" in regel:
         n += 1

@@ -53,6 +53,9 @@ CREATE INDEX IF NOT EXISTS ix_gesichter_person ON gesichter(person_id);
 CREATE TABLE IF NOT EXISTS textvektoren (
     text TEXT, kennung TEXT, vektor BLOB, PRIMARY KEY (text, kennung)
 );
+CREATE TABLE IF NOT EXISTS meta (
+    schluessel TEXT PRIMARY KEY, wert TEXT
+);
 CREATE TABLE IF NOT EXISTS protokolle (
     id INTEGER PRIMARY KEY,
     datei TEXT, zeit TEXT, beschreibung TEXT, rueckgaengig INTEGER DEFAULT 0
@@ -113,21 +116,38 @@ class Datenbank:
     def eins(self, sql: str, params=()):
         return self._con().execute(sql, params).fetchone()
 
+    def meta(self, schluessel: str) -> str | None:
+        r = self.eins("SELECT wert FROM meta WHERE schluessel=?", (schluessel,))
+        return r["wert"] if r else None
+
+    def meta_setzen(self, schluessel: str, wert: str) -> None:
+        with self.verbindung() as v:
+            v.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (schluessel, wert))
+
     # ---------------------------------------------------------- Suchtext
 
     def suchtext_aktualisieren(self, bild_id: int) -> None:
-        r = self.eins("SELECT pfad, kamera, tags, ocr_text, schlagwoerter, beschreibung, beschreibung_en "
-                     "FROM bilder WHERE id=?", (bild_id,))
-        if not r:
-            return
-        personen = [p["name"] for p in self.abfrage(
-            "SELECT DISTINCT p.name FROM gesichter g JOIN personen p ON p.id=g.person_id "
-            "WHERE g.bild_id=? AND p.name IS NOT NULL", (bild_id,))]
-        teile = [r["pfad"], r["kamera"], r["tags"], r["ocr_text"], r["schlagwoerter"], r["beschreibung"],
-                 r["beschreibung_en"], " ".join(personen)]
-        with self.verbindung() as v:
-            v.execute("UPDATE bilder SET suchtext=? WHERE id=?",
-                      (normalisiere(" ".join(t or "" for t in teile)), bild_id))
+        self.suchtext_aktualisieren_viele([bild_id])
+
+    def suchtext_aktualisieren_viele(self, bild_ids) -> None:
+        """Suchtext für mehrere Bilder in einem Rutsch neu bilden (schnell auch für 10.000+ Bilder)."""
+        bild_ids = sorted({int(i) for i in bild_ids if i is not None})
+        for start in range(0, len(bild_ids), 500):
+            teil = bild_ids[start:start + 500]
+            platz = ",".join("?" * len(teil))
+            personen: dict[int, list[str]] = {}
+            for p in self.abfrage(
+                    "SELECT DISTINCT g.bild_id, p.name FROM gesichter g JOIN personen p ON p.id=g.person_id "
+                    f"WHERE g.bild_id IN ({platz}) AND p.name IS NOT NULL ORDER BY p.name", teil):
+                personen.setdefault(p["bild_id"], []).append(p["name"])
+            updates = []
+            for r in self.abfrage("SELECT id, pfad, kamera, tags, ocr_text, schlagwoerter, beschreibung, "
+                                  f"beschreibung_en FROM bilder WHERE id IN ({platz})", teil):
+                teile = [r["pfad"], r["kamera"], r["tags"], r["ocr_text"], r["schlagwoerter"], r["beschreibung"],
+                         r["beschreibung_en"], " ".join(personen.get(r["id"], []))]
+                updates.append((normalisiere(" ".join(t or "" for t in teile)), r["id"]))
+            with self.verbindung() as v:
+                v.executemany("UPDATE bilder SET suchtext=? WHERE id=?", updates)
 
     # ---------------------------------------------------------- Vektoren
 
