@@ -53,6 +53,9 @@ Prozessor (die sind auch so schnell).
    Thema zu welcher Kategorie zählt, eigene Themen und Kategorien anlegen, speichern. Die Einordnung wird sofort neu
    berechnet, ohne die Bilder neu zu analysieren.
 4. **Personen:** Gruppen benennen, gleiche Personen zusammenführen. Oder ein Foto hineinziehen, um alle Bilder dieser Person zu finden.
+   Ein Klick aufs Gesicht zeigt alle Gesichter der Person, die unsichersten zuerst. Falsche markieren und
+   **Nicht diese Person** (wird gemerkt, auch für ähnliche Gesichter), **Kein Gesicht** oder **Anderer Person zuweisen**.
+   Benannte und korrigierte Personen bleiben beim Neugruppieren erhalten, unbearbeitete Gruppen werden neu gebildet.
 5. **Suche:** prüfen, korrigieren (Bilder markieren → Kategorie anklicken).
 6. **Sortieren:** Modus wählen, Vorschau ansehen, ausführen. Unter „Bisherige Läufe“ lässt sich jeder Lauf zurücknehmen.
 7. **Karte:** zeigt alle Fotos mit Standort. Die Zahl an einer Gruppe ist die Anzahl Fotos dort; Klick darauf listet sie
@@ -97,7 +100,7 @@ Mit Grafikkarte geht es deutlich schneller. Der Lauf kann jederzeit angehalten u
 |---|---|
 | Bildinhalt, Bedeutungssuche (versteht Deutsch) | CLIP `xlm-roberta-base-ViT-B-32` (LAION, open_clip) |
 | Bildbeschreibung | BLIP `Salesforce/blip-image-captioning-base`, übersetzt mit `Helsinki-NLP/opus-mt-en-de` |
-| Gesichter | OpenCV YuNet (Erkennung) + SFace (Wiedererkennung) |
+| Gesichter | InsightFace buffalo_l: SCRFD-10G (Erkennung, 5 Merkmalspunkte) + ArcFace R50/WebFace600K (Wiedererkennung), über onnxruntime. Modelllizenz: nur nicht-kommerziell |
 | Texterkennung | Windows-Texterkennung (Deutsch), sonst RapidOCR |
 
 Karte: [Leaflet](https://leafletjs.com) und Leaflet.markercluster (liegen im Programmordner, kein Nachladen aus dem Netz).

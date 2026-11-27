@@ -47,7 +47,7 @@ STANDARD = {
         "modell": "Salesforce/blip-image-captioning-base",
         "uebersetzer": "Helsinki-NLP/opus-mt-en-de",   # leer = englisch lassen
     },
-    "gesichter": {"aktiv": True, "min_groesse": 40, "schwelle": 0.40},
+    "gesichter": {"aktiv": True, "min_groesse": 40},  # Schwellen: siehe personen.STANDARD (überschreibbar)
     "clip": {
         "modell": "xlm-roberta-base-ViT-B-32",
         "pretrained": "laion5b_s13b_b90k",

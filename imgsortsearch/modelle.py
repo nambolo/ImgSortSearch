@@ -237,46 +237,200 @@ def softmax(x: np.ndarray, temperatur: float = 100.0) -> np.ndarray:
 
 # ------------------------------------------------------------------ Gesichter
 
-YUNET = ["https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
-         "https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx"]
-SFACE = ["https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
-         "https://huggingface.co/opencv/face_recognition_sface/resolve/main/face_recognition_sface_2021dec.onnx"]
+# InsightFace "buffalo_l": SCRFD-10G findet Gesichter samt 5 Merkmalspunkten (Augen, Nase, Mundwinkel),
+# ArcFace (ResNet-50, trainiert auf WebFace600K) erzeugt 512er-Merkmale. Deutlich genauer als
+# YuNet/SFace, besonders bei Licht, Alter, Brillen und leicht gedrehten Köpfen.
+# Lizenz der Modelle: nur für nicht-kommerzielle Nutzung (privates Fotoarchiv passt).
+BUFFALO = ["https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"]
+GESICHT_DATEIEN = ("det_10g.onnx", "w600k_r50.onnx")
+GESICHT_KENNUNG = "buffalo_l/scrfd10g+w600k_r50"
+
+# Zielpositionen der 5 Merkmalspunkte im 112x112-Ausschnitt, auf den ArcFace trainiert ist
+ARCFACE_PUNKTE = np.array([[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366],
+                           [41.5493, 92.3655], [70.7299, 92.2041]], dtype=np.float32)
+
+
+def gesichtsmodelle_laden() -> tuple[Path, Path]:
+    """Lädt buffalo_l einmalig und behält nur die beiden benötigten Dateien (ca. 190 MB)."""
+    ordner = modell_ordner() / "buffalo_l"
+    ordner.mkdir(parents=True, exist_ok=True)
+    ziele = [ordner / n for n in GESICHT_DATEIEN]
+    if all(z.exists() and z.stat().st_size > 0 for z in ziele):
+        return ziele[0], ziele[1]
+    import zipfile
+    zip_pfad = lade_datei(BUFFALO, ordner / "buffalo_l.zip")
+    try:
+        with zipfile.ZipFile(zip_pfad) as zf:
+            for ziel in ziele:
+                eintrag = next(n for n in zf.namelist() if n.rsplit("/", 1)[-1] == ziel.name)
+                tmp = ziel.with_suffix(".part")
+                with zf.open(eintrag) as quelle, open(tmp, "wb") as f:
+                    shutil.copyfileobj(quelle, f)
+                tmp.replace(ziel)
+    except (zipfile.BadZipFile, StopIteration) as e:
+        zip_pfad.unlink(missing_ok=True)  # beim nächsten Start neu laden
+        raise RuntimeError(f"Gesichtsmodell-Archiv unbrauchbar: {e}")
+    zip_pfad.unlink(missing_ok=True)
+    return ziele[0], ziele[1]
+
+
+def _aehnlichkeits_transformation(quelle: np.ndarray, ziel: np.ndarray) -> np.ndarray:
+    """Drehung + Skalierung + Verschiebung (Umeyama), die die Punkte quelle bestmöglich auf ziel legt. 2x3."""
+    mq, mz = quelle.mean(0), ziel.mean(0)
+    q, z = quelle - mq, ziel - mz
+    kov = z.T @ q / len(quelle)
+    u, s, vt = np.linalg.svd(kov)
+    d = np.ones(2)
+    if np.linalg.det(u) * np.linalg.det(vt) < 0:
+        d[1] = -1
+    r = u @ np.diag(d) @ vt
+    skala = (s * d).sum() / ((q ** 2).sum() / len(quelle))
+    m = np.zeros((2, 3), dtype=np.float32)
+    m[:, :2] = skala * r
+    m[:, 2] = mz - skala * r @ mq
+    return m
+
+
+def _nms(boxen: np.ndarray, scores: np.ndarray, schwelle: float = 0.4) -> list[int]:
+    x1, y1, x2, y2 = boxen.T
+    flaeche = (x2 - x1) * (y2 - y1)
+    reihenfolge = scores.argsort()[::-1]
+    behalten = []
+    while reihenfolge.size:
+        i = reihenfolge[0]
+        behalten.append(int(i))
+        xx1 = np.maximum(x1[i], x1[reihenfolge[1:]])
+        yy1 = np.maximum(y1[i], y1[reihenfolge[1:]])
+        xx2 = np.minimum(x2[i], x2[reihenfolge[1:]])
+        yy2 = np.minimum(y2[i], y2[reihenfolge[1:]])
+        schnitt = np.maximum(0, xx2 - xx1) * np.maximum(0, yy2 - yy1)
+        iou = schnitt / (flaeche[i] + flaeche[reihenfolge[1:]] - schnitt + 1e-9)
+        reihenfolge = reihenfolge[1:][iou <= schwelle]
+    return behalten
+
+
+def gesichts_qualitaet(score: float, kante: float, frontal: float, schaerfe: float) -> float:
+    """0..1: wie verlässlich das Merkmal ist. Kleine, unscharfe, seitliche oder unsichere
+    Gesichter bekommen wenig. Nur gute Gesichter dürfen neue Personen bilden."""
+    q_score = np.clip((score - 0.5) / 0.3, 0, 1)
+    q_groesse = np.clip((kante - 24) / (80 - 24), 0, 1)
+    q_frontal = np.clip((frontal - 0.25) / 0.5, 0, 1)
+    q_schaerfe = np.clip((np.log10(max(schaerfe, 1)) - 1.3) / 1.0, 0, 1)
+    return float(q_score * (0.4 + 0.6 * q_groesse) * (0.3 + 0.7 * q_frontal) * (0.5 + 0.5 * q_schaerfe))
 
 
 class GesichtsModell:
-    """Gesichtserkennung mit OpenCV (YuNet findet Gesichter, SFace erzeugt Merkmale)."""
+    """Gesichter finden (SCRFD), ausrichten und Merkmale berechnen (ArcFace). Läuft mit onnxruntime."""
 
-    def __init__(self, min_groesse: int = 40):
+    kennung = GESICHT_KENNUNG
+    dimension = 512
+
+    def __init__(self, min_groesse: int = 32, min_score: float = 0.6, eingabe: int = 640):
         import cv2
+        import onnxruntime as ort
         self.cv2 = cv2
-        det = lade_datei(YUNET, modell_ordner() / "face_detection_yunet_2023mar.onnx")
-        rec = lade_datei(SFACE, modell_ordner() / "face_recognition_sface_2021dec.onnx")
-        self.detektor = cv2.FaceDetectorYN.create(str(det), "", (320, 320), 0.85, 0.3, 5000)
-        self.erkenner = cv2.FaceRecognizerSF.create(str(rec), "")
+        det, rec = gesichtsmodelle_laden()
+        opt = ort.SessionOptions()
+        opt.intra_op_num_threads = max(1, (os.cpu_count() or 2) - 1)
+        opt.log_severity_level = 3
+        anbieter = ["CPUExecutionProvider"]
+        self.det = ort.InferenceSession(str(det), opt, providers=anbieter)
+        self.rec = ort.InferenceSession(str(rec), opt, providers=anbieter)
+        self.det_in = self.det.get_inputs()[0].name
+        self.rec_in = self.rec.get_inputs()[0].name
         self.min_groesse = min_groesse
+        self.min_score = min_score
+        self.eingabe = eingabe
+        self._anker: dict = {}
         self._lock = threading.Lock()
 
-    def finde(self, img: Image.Image, max_kante: int = 1600) -> list[dict]:
-        """Liefert Gesichter mit Box (in Original-Pixeln des übergebenen Bildes) und 128er-Vektor."""
+    # --- Erkennung
+    def _anker_punkte(self, h: int, w: int, schritt: int) -> np.ndarray:
+        k = (h, w, schritt)
+        if k not in self._anker:
+            gy, gx = np.mgrid[:h, :w]
+            p = (np.stack([gx, gy], axis=-1).astype(np.float32) * schritt).reshape(-1, 2)
+            self._anker[k] = np.repeat(p, 2, axis=0)  # 2 Anker je Position
+        return self._anker[k]
+
+    def _erkennen(self, rgb: np.ndarray, schwelle: float):
+        cv2 = self.cv2
+        h, w = rgb.shape[:2]
+        n = self.eingabe
+        faktor = n / max(h, w)
+        nh, nw = max(1, round(h * faktor)), max(1, round(w * faktor))
+        leinwand = np.zeros((n, n, 3), dtype=np.float32)
+        leinwand[:nh, :nw] = cv2.resize(rgb, (nw, nh)).astype(np.float32)
+        blob = ((leinwand - 127.5) / 128.0).transpose(2, 0, 1)[None]
+        aus = self.det.run(None, {self.det_in: blob})
+        boxen, scores, punkte = [], [], []
+        for i, schritt in enumerate((8, 16, 32)):
+            s = aus[i].reshape(-1)
+            b = aus[i + 3].reshape(-1, 4) * schritt
+            k = aus[i + 6].reshape(-1, 10) * schritt
+            anker = self._anker_punkte(n // schritt, n // schritt, schritt)
+            treffer = np.where(s >= schwelle)[0]
+            if not len(treffer):
+                continue
+            a, b, k = anker[treffer], b[treffer], k[treffer]
+            boxen.append(np.hstack([a - b[:, :2], a + b[:, 2:]]))
+            punkte.append((np.tile(a, 5) + k).reshape(-1, 5, 2))
+            scores.append(s[treffer])
+        if not scores:
+            return np.zeros((0, 4)), np.zeros(0), np.zeros((0, 5, 2))
+        boxen, scores, punkte = np.vstack(boxen) / faktor, np.concatenate(scores), np.vstack(punkte) / faktor
+        behalten = _nms(boxen, scores)
+        return boxen[behalten], scores[behalten], punkte[behalten]
+
+    # --- Merkmale
+    def _ausrichten(self, rgb: np.ndarray, punkte: np.ndarray) -> np.ndarray:
+        m = _aehnlichkeits_transformation(punkte.astype(np.float32), ARCFACE_PUNKTE)
+        return self.cv2.warpAffine(rgb, m, (112, 112), borderValue=0.0)
+
+    def _merkmale(self, ausschnitte: list[np.ndarray]) -> np.ndarray:
+        x = ((np.stack(ausschnitte).astype(np.float32) - 127.5) / 127.5).transpose(0, 3, 1, 2)
+        v = self.rec.run(None, {self.rec_in: x})[0].astype(np.float32)
+        return v / (np.linalg.norm(v, axis=1, keepdims=True) + 1e-9)
+
+    @staticmethod
+    def _frontal(p: np.ndarray) -> float:
+        """1 = frontal, 0 = Profil. Liegt die Nase nicht zwischen den Augen, ist der Kopf stark gedreht."""
+        auge_l, auge_r, nase = p[0], p[1], p[2]
+        abstand = np.linalg.norm(auge_r - auge_l) + 1e-6
+        mitte = (auge_l + auge_r) / 2
+        richtung = (auge_r - auge_l) / abstand
+        seitlich = abs(float(np.dot(nase - mitte, richtung))) / (abstand / 2)
+        return float(np.clip(1 - seitlich, 0, 1))
+
+    def finde(self, img: Image.Image, max_kante: int = 2000) -> list[dict]:
+        """Gesichter mit Box (Pixel des übergebenen Bildes), score, qualitaet und 512er-Vektor (normiert)."""
         cv2 = self.cv2
         faktor = min(1.0, max_kante / max(img.size))
         klein = img if faktor >= 1 else img.resize((int(img.width * faktor), int(img.height * faktor)))
-        bgr = cv2.cvtColor(np.asarray(klein), cv2.COLOR_RGB2BGR)
+        rgb = np.ascontiguousarray(np.asarray(klein.convert("RGB")))
         with self._lock:
-            self.detektor.setInputSize((bgr.shape[1], bgr.shape[0]))
-            _, faces = self.detektor.detect(bgr)
-            erg = []
-            if faces is None:
-                return erg
-            for f in faces:
-                x, y, w, h = f[:4]
-                if min(w, h) < self.min_groesse * faktor:
+            boxen, scores, punkte = self._erkennen(rgb, self.min_score)
+            kandidaten = []
+            for box, score, p in zip(boxen, scores, punkte):
+                x1, y1, x2, y2 = box
+                bw, bh = x2 - x1, y2 - y1
+                if min(bw, bh) < self.min_groesse * faktor:
                     continue
-                ausgerichtet = self.erkenner.alignCrop(bgr, f)
-                v = self.erkenner.feature(ausgerichtet).flatten().astype(np.float32)
-                v /= (np.linalg.norm(v) + 1e-9)
-                erg.append({"x": int(x / faktor), "y": int(y / faktor), "w": int(w / faktor),
-                            "h": int(h / faktor), "score": float(f[14]), "vektor": v})
+                ausschnitt = self._ausrichten(rgb, p)
+                grau = cv2.cvtColor(ausschnitt, cv2.COLOR_RGB2GRAY)
+                schaerfe = float(cv2.Laplacian(grau[20:100, 20:92], cv2.CV_64F).var())
+                frontal = self._frontal(p)
+                q = gesichts_qualitaet(float(score), min(bw, bh) / faktor, frontal, schaerfe)
+                kandidaten.append((box, float(score), q, ausschnitt))
+            if not kandidaten:
+                return []
+            vektoren = self._merkmale([k[3] for k in kandidaten])
+        erg = []
+        for (box, score, q, _), v in zip(kandidaten, vektoren):
+            x1, y1, x2, y2 = box / faktor
+            x1, y1 = max(0.0, x1), max(0.0, y1)
+            erg.append({"x": int(x1), "y": int(y1), "w": int(x2 - x1), "h": int(y2 - y1),
+                        "score": score, "qualitaet": round(q, 3), "vektor": v})
         return erg
 
 
