@@ -131,7 +131,8 @@ function statusText(s) {
     `Bilder im Index: <b>${s.gesamt.toLocaleString("de")}</b>`,
     `Noch zu analysieren: <b>${s.offen.toLocaleString("de")}</b>`,
     `exiftool: ${s.exiftool ? "gefunden" : "nicht gefunden (Lesen über Pillow, Einbetten nicht möglich)"}`,
-    `Rechnet auf: ${esc(Object.values(s.geraete || {})[0] || "wird beim ersten Indexlauf ermittelt")}`,
+    `Rechnet auf: ${esc(Object.entries(s.geraete || {}).filter(([n]) => n !== "gesichter").map(([, g]) => g)[0] || "wird beim ersten Indexlauf ermittelt")}`,
+    ...((s.geraete || {}).gesichter ? [`Gesichter: ${esc(s.geraete.gesichter)}`] : []),
     ...f.map(([n, t]) => `<span style="color:var(--schlecht)">Modell ${esc(n)} nicht verfügbar: ${esc(t)}</span>`),
     ...(s.index.fehler || []).slice(-5).map((t) => `<span style="color:var(--warn)">${esc(t)}</span>`),
   ].join("<br>");
