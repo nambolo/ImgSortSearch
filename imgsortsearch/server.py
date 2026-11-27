@@ -848,6 +848,13 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
             b = {int(i) for i in g.get("behalten", [])}
             if not b:
                 raise HTTPException(400, "In jeder Gruppe muss mindestens ein Bild behalten werden.")
+            # das behaltene Bild muss wirklich noch da sein, sonst wäre danach keine Fassung mehr übrig
+            # (z. B. veraltetes Ergebnis, Datei inzwischen woanders)
+            da = [r["pfad"] for r in z.db.abfrage(
+                f"SELECT pfad FROM bilder WHERE id IN ({','.join('?' * len(b))})", list(b))]
+            if not any(Path(p).is_file() for p in da):
+                raise HTTPException(400, "Das Bild zum Behalten ist nicht mehr da. Bitte die Dublettensuche "
+                                         "neu starten.")
             behalten |= b
             weg += [int(i) for i in g.get("weg", [])]
         quarantaene = quarantaene_ordner(z.e)

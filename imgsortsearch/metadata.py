@@ -6,6 +6,7 @@ Kamera, GPS-Koordinaten, vorhandenen Schlagwörtern und Software.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -159,7 +160,7 @@ def _aus_exiftool(info: BildInfo, d: dict) -> None:
     info.modell = str(d.get("Model", "") or "")
     info.software = str(d.get("Software", "") or "")
     lat, lon = d.get("GPSLatitude"), d.get("GPSLongitude")
-    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)) and (lat or lon):
+    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)) and _gps_gueltig(lat, lon):
         info.gps_lat, info.gps_lon = float(lat), float(lon)
     info.breite = d.get("ImageWidth")
     info.hoehe = d.get("ImageHeight")
@@ -168,11 +169,23 @@ def _aus_exiftool(info: BildInfo, d: dict) -> None:
 
 # ---------------------------------------------------------------- Pillow
 
+def _gps_gueltig(lat: float, lon: float) -> bool:
+    """0/0 (kein Empfang), NaN und Werte außerhalb der Erde gelten als „kein Standort“.
+    NaN würde sonst die ganze Karte lahmlegen (lässt sich nicht als JSON senden)."""
+    return (math.isfinite(lat) and math.isfinite(lon) and -90 <= lat <= 90 and -180 <= lon <= 180
+            and bool(lat or lon))
+
+
 def _gps_zu_grad(werte, ref) -> float | None:
     try:
         g, m, s = (float(x) for x in werte)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, ZeroDivisionError):
         return None
+    # manche Kameras schreiben 0/0, solange sie keinen Empfang haben (ergibt NaN)
+    if math.isnan(g):
+        return None
+    m = 0.0 if math.isnan(m) else m
+    s = 0.0 if math.isnan(s) else s
     grad = g + m / 60 + s / 3600
     if str(ref).upper() in ("S", "W"):
         grad = -grad
@@ -214,7 +227,7 @@ def _exif_auswerten(info: BildInfo, exif) -> None:
     if gps and 2 in gps and 4 in gps:
         lat = _gps_zu_grad(gps.get(2), gps.get(1, "N"))
         lon = _gps_zu_grad(gps.get(4), gps.get(3, "E"))
-        if lat is not None and lon is not None and (lat or lon):
+        if lat is not None and lon is not None and _gps_gueltig(lat, lon):
             info.gps_lat, info.gps_lon = lat, lon
 
 
@@ -247,6 +260,11 @@ def _eine_datei(p: Path, roh: dict) -> BildInfo:
     d = roh.get(p) or roh.get(Path(str(p).replace("\\", "/")))
     if d:
         _aus_exiftool(info, d)
+        if info.gps_lat is None and d.get("GPSLatitude") == "" and d.get("GPSLongitude") == "":
+            # exiftool gibt bei Sekunden 0/0 (manche Handys) nichts aus, Grad und Minuten stimmen aber
+            ersatz = BildInfo(pfad=p)
+            _aus_pillow(ersatz)
+            info.gps_lat, info.gps_lon = ersatz.gps_lat, ersatz.gps_lon
     else:
         _aus_pillow(info)
     if not info.datum:
