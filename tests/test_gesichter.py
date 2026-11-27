@@ -300,3 +300,91 @@ def test_zusammenfuehren_mit_fehler_bleibt_korrigierbar(db):
     personen.neu_gruppieren(db)
     g = _gruppen(db)
     assert g[pa] == a and not (b & g[pa])
+
+
+def test_zusammenfuehren_behaelt_den_namen(db):
+    """Unbenannte Gruppe als Ziel gewählt: der Name der anderen Gruppe darf nicht verloren gehen."""
+    rng = np.random.default_rng(11)
+    a = _person(rng, 6)
+    with db.verbindung() as v:
+        anna = v.execute("INSERT INTO personen (name) VALUES ('Anna')").lastrowid
+        unbenannt = v.execute("INSERT INTO personen (name) VALUES (NULL)").lastrowid
+        for x in a[:3]:
+            _gesicht(v, db, x, person=anna)
+        for x in a[3:]:
+            _gesicht(v, db, x, person=unbenannt)
+    ziel = personen.zusammenfuehren(db, unbenannt, [anna])
+    assert ziel == anna
+    assert db.eins("SELECT COUNT(*) n FROM gesichter WHERE person_id=?", (anna,))["n"] == 6
+    assert db.eins("SELECT id FROM personen WHERE id=?", (unbenannt,)) is None
+
+
+def _zwei_ansichten(rng, n, naehe=0.7):
+    """Eine Person in zwei Varianten (z. B. mit/ohne Brille): Zentren mit Kosinus `naehe`."""
+    c1 = rng.normal(size=DIM)
+    c1 /= np.linalg.norm(c1)
+    r = rng.normal(size=DIM)
+    r -= (r @ c1) * c1
+    r /= np.linalg.norm(r)
+    c2 = naehe * c1 + np.sqrt(1 - naehe ** 2) * r
+    erg = []
+    for c in (c1, c2):
+        for _ in range(n):
+            v = c + rng.normal(size=DIM) * 0.8 / np.sqrt(DIM)
+            erg.append(v / np.linalg.norm(v))
+    return erg
+
+
+def test_teilgruppen_derselben_person_werden_vereint(db):
+    rng = np.random.default_rng(12)
+    with db.verbindung() as v:
+        eine = {_gesicht(v, db, x) for x in _zwei_ansichten(rng, 12)}
+        andere = {_gesicht(v, db, x) for x in _person(rng, 12)}
+    # ohne Vereinen zerfiele die Person (Kontrolle des Testaufbaus)
+    mat = np.stack([blob for blob in _zwei_ansichten(np.random.default_rng(12), 12)])
+    assert len(personen.cluster(mat, 0.50)) >= 2
+    personen.neu_gruppieren(db)
+    g = _gruppen(db)
+    assert eine in g.values() and andere in g.values()
+
+
+def test_neue_teilgruppe_kommt_zur_benannten_person(db):
+    rng = np.random.default_rng(13)
+    faces = _zwei_ansichten(rng, 10)
+    with db.verbindung() as v:
+        anna = v.execute("INSERT INTO personen (name) VALUES ('Anna')").lastrowid
+        for x in faces[:10]:
+            _gesicht(v, db, x, person=anna, fest=1)
+        neu = {_gesicht(v, db, x) for x in faces[10:]}
+    personen.neu_gruppieren(db)
+    assert neu <= _gruppen(db)[anna]
+
+
+def test_vorschlag_und_nein_merken(db):
+    rng = np.random.default_rng(14)
+    faces = _zwei_ansichten(rng, 8, naehe=0.45)  # zu unsicher für automatisch, aber vorschlagswürdig
+    with db.verbindung() as v:
+        a = v.execute("INSERT INTO personen (name, fest) VALUES (NULL, 1)").lastrowid
+        b = v.execute("INSERT INTO personen (name, fest) VALUES (NULL, 1)").lastrowid
+        for x in faces[:8]:
+            _gesicht(v, db, x, person=a)
+        for x in faces[8:]:
+            _gesicht(v, db, x, person=b)
+        for x in _person(rng, 8):
+            _gesicht(v, db, x)
+    personen.neu_gruppieren(db)
+    vs = personen.vorschlaege(db)
+    assert {(x["a"]["id"], x["b"]["id"]) for x in vs} in ({(a, b)}, {(b, a)})
+    personen.verschieden_merken(db, a, b)
+    assert personen.vorschlaege(db) == []
+    # "Ja": zusammenführen, der Vorschlag verschwindet
+    personen.zusammenfuehren(db, a, [b])
+    assert db.eins("SELECT COUNT(*) n FROM gesichter WHERE person_id=?", (a,))["n"] == 16
+
+
+def test_vereinen_respektiert_verboten():
+    rng = np.random.default_rng(15)
+    mat = np.stack(_zwei_ansichten(rng, 5))
+    gruppen = [np.arange(5), np.arange(5, 10)]
+    assert len(personen.gruppen_vereinen(mat, gruppen, 0.55)) == 1
+    assert len(personen.gruppen_vereinen(mat, gruppen, 0.55, lambda x, y: True)) == 2

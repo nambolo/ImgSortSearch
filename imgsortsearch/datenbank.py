@@ -65,6 +65,12 @@ CREATE TABLE IF NOT EXISTS bild_zusatz (
     PRIMARY KEY (bild_id, kategorie)
 );
 -- "Nicht diese Person": das Gesicht wird dieser Person nie wieder automatisch zugeordnet
+-- "Nein, verschiedene Personen": dieses Paar nie wieder vorschlagen oder automatisch vereinen (a < b)
+CREATE TABLE IF NOT EXISTS personen_verschieden (
+    a INTEGER NOT NULL REFERENCES personen(id) ON DELETE CASCADE,
+    b INTEGER NOT NULL REFERENCES personen(id) ON DELETE CASCADE,
+    PRIMARY KEY (a, b)
+);
 CREATE TABLE IF NOT EXISTS gesicht_abgelehnt (
     gesicht_id INTEGER NOT NULL REFERENCES gesichter(id) ON DELETE CASCADE,
     person_id INTEGER NOT NULL REFERENCES personen(id) ON DELETE CASCADE,
@@ -203,7 +209,7 @@ class Datenbank:
         """Alle Bilder, Gesichter und Personen löschen. Protokolle (für Rückgängig) bleiben."""
         n = self.eins("SELECT COUNT(*) FROM bilder")[0]
         with self.verbindung() as v:
-            for tabelle in ("gesicht_abgelehnt", "bild_zusatz", "gesichter", "personen", "bilder"):
+            for tabelle in ("personen_verschieden", "gesicht_abgelehnt", "bild_zusatz", "gesichter", "personen", "bilder"):
                 v.execute(f"DELETE FROM {tabelle}")
             v.execute("DELETE FROM meta WHERE schluessel NOT IN ('gesicht_modell', 'clip_kennung', 'suchtext_stand')")
         with self.schreib_lock:

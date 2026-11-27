@@ -132,10 +132,14 @@
         <label class="knopf primaer">Foto wählen<input type="file" id="person-foto" accept="image/*" hidden></label>
       </div>
       <div class="karte hinweis-karte" id="personen-hinweis" hidden></div>
+      <div class="karte" id="personen-vorschlaege" hidden>
+        <div class="zeile zwischen"><div><strong>Ist das dieselbe Person?</strong><br><span class="hinweis">Diese Gruppen sehen sich sehr ähnlich. Ein Klick genügt.</span></div><span class="hinweis" id="pv-anzahl"></span></div>
+        <div class="vorschlag-liste" id="pv-liste"></div>
+      </div>
       <div class="karte" id="person-detail" hidden>
         <div class="zeile zwischen">
           <div><strong id="pd-titel"></strong><br><span class="hinweis">Unsicherste Gesichter zuerst. Falsche anklicken (Umschalt für Bereich), dann unten korrigieren.</span></div>
-          <div class="zeile"><button class="knopf leicht" id="pd-bilder">Alle Bilder zeigen</button><button class="knopf leicht" id="pd-schliessen">Schließen</button></div>
+          <div class="zeile"><select id="pd-gruppe" title="Alle Gesichter dieser Gruppe einer anderen Person zuordnen (gleiche Person, zwei Gruppen)"><option value="">Ganze Gruppe zusammenführen mit …</option></select><button class="knopf leicht" id="pd-bilder">Alle Bilder zeigen</button><button class="knopf leicht" id="pd-schliessen">Schließen</button></div>
         </div>
         <div class="gesichter-gitter" id="pd-gesichter"></div>
         <div class="zeile pd-aktionen">

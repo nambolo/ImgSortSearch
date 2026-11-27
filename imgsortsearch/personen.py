@@ -29,6 +29,8 @@ STANDARD = {
     "bleiben": 0.35,       # darunter fliegt ein automatisch zugeordnetes Gesicht aus einer Person
     "suche": 0.40,         # Suche per Referenzfoto
     "min_qualitaet": 0.35,  # ab hier darf ein Gesicht neue Gruppen bilden
+    "vereinen": 0.55,      # Gruppenzentren so ähnlich: automatisch dieselbe Person
+    "vorschlag": 0.35,     # ab hier "Ist das dieselbe Person?" vorschlagen
 }
 # alter Name des Werts, als die Grenze noch fürs alte Modell (SFace) galt
 SUCH_SCHWELLE = STANDARD["suche"]
@@ -157,6 +159,53 @@ def cluster(mat: np.ndarray, schwelle: float, min_groesse: int = 2) -> list[list
     return sorted(erg, key=len, reverse=True)
 
 
+def gruppen_vereinen(mat: np.ndarray, gruppen: list[np.ndarray], schwelle: float,
+                     verboten=lambda a, b: False) -> list[np.ndarray]:
+    """Vereint Gruppen, deren Zentren sich ähneln (ähnlichstes Paar zuerst, average linkage über Zentren).
+
+    Das Graph-Clustering ist absichtlich streng, damit es keine verschiedenen Personen verkettet.
+    Dadurch zerfällt dieselbe Person oft in Teilgruppen (Brille, Licht, Alter, Bart). Zentren
+    mitteln das Rauschen einzelner Fotos heraus und sind deshalb viel verlässlicher vergleichbar."""
+    gruppen = [np.asarray(g) for g in gruppen]
+    if len(gruppen) < 2:
+        return gruppen
+    summen = np.stack([mat[g].sum(0) for g in gruppen])
+    zentren = _norm(summen)
+    aktiv = np.ones(len(gruppen), dtype=bool)
+    mitglieder: list[list[int]] = [[k] for k in range(len(gruppen))]  # ursprüngliche Gruppen je Cluster
+    sims = zentren @ zentren.T
+    np.fill_diagonal(sims, -1)
+    while True:
+        k = int(np.argmax(sims))
+        a, b = divmod(k, len(gruppen))
+        if sims[a, b] < schwelle:
+            break
+        if any(verboten(x, y) for x in mitglieder[a] for y in mitglieder[b]):
+            sims[a, b] = sims[b, a] = -1
+            continue
+        gruppen[a] = np.concatenate([gruppen[a], gruppen[b]])
+        mitglieder[a] += mitglieder[b]
+        summen[a] += summen[b]
+        zentren[a] = _norm(summen[a])
+        aktiv[b] = False
+        neu = zentren @ zentren[a]
+        neu[~aktiv] = -1
+        neu[a] = -1
+        sims[a, :] = neu
+        sims[:, a] = neu
+        sims[b, :] = -1
+        sims[:, b] = -1
+    return sorted([g for g, ok in zip(gruppen, aktiv) if ok], key=len, reverse=True)
+
+
+def _verschieden(db: Datenbank) -> set[tuple[int, int]]:
+    return {(z["a"], z["b"]) for z in db.abfrage("SELECT a, b FROM personen_verschieden")}
+
+
+def _paar(a: int, b: int) -> tuple[int, int]:
+    return (a, b) if a < b else (b, a)
+
+
 # ------------------------------------------------------------------ Gruppieren
 
 def _lade(db: Datenbank):
@@ -270,6 +319,34 @@ def neu_gruppieren(db: Datenbank, einstellungen: dict | None = None) -> dict:
     # 4. Rest clustern: nur gute Gesichter bilden neue Gruppen
     frei = np.where((person == 0) & ~fest & (q >= s["min_qualitaet"]))[0]
     neue: list[np.ndarray] = [frei[g] for g in cluster(mat[frei], s["gruppe"])]
+    verschieden = _verschieden(db)
+
+    def alte_gruppe(idx: np.ndarray) -> int:
+        alt = [int(p) for p in vorher[idx] if p]
+        return max(set(alt), key=alt.count) if alt else 0
+
+    # Teilgruppen derselben Person zusammenfassen (außer der Nutzer hat "verschieden" gesagt)
+    alte = [alte_gruppe(g) for g in neue]
+    neue = gruppen_vereinen(mat, neue, s["vereinen"],
+                            lambda x, y: bool(alte[x] and alte[y] and _paar(alte[x], alte[y]) in verschieden))
+    # passt eine ganze neue Gruppe klar zu einer bekannten Person: dazu
+    if zentren and neue:
+        pids = list(zentren)
+        rest = []
+        for idx in neue:
+            z = _norm(mat[idx].mean(0))
+            sim = np.array([max(float(z @ c) for c in zentren[p]) for p in pids])
+            alt = alte_gruppe(idx)
+            for c, pid in enumerate(pids):
+                if alt and _paar(alt, pid) in verschieden:
+                    sim[c] = -1
+            reihe = np.argsort(-sim)
+            zweite = sim[reihe[1]] if len(reihe) > 1 else -1
+            if sim[reihe[0]] >= s["vereinen"] and sim[reihe[0]] - zweite >= s["abstand"]:
+                person[idx] = pids[reihe[0]]
+            else:
+                rest.append(idx)
+        neue = rest
     # bestehende automatische Gruppen-IDs weiterverwenden, wenn eine neue Gruppe überwiegend aus
     # ihnen besteht: so springen Gruppen beim Neugruppieren nicht ohne Grund um
     benutzt: set[int] = set(bleibende)
@@ -303,6 +380,56 @@ def neu_gruppieren(db: Datenbank, einstellungen: dict | None = None) -> dict:
     db.suchtext_aktualisieren_viele({int(d["bild"][i]) for i in geaendert})
     return {"zugeordnet": int((person > 0).sum()), "geaendert": int(len(geaendert)),
             "personen": int(len(set(person[person > 0].tolist())))}
+
+
+def vorschlaege(db: Datenbank, einstellungen: dict | None = None, limit: int = 12) -> list[dict]:
+    """Paare von Gruppen, die vermutlich dieselbe Person zeigen: "Ist das dieselbe Person?".
+
+    Nicht vorgeschlagen werden zwei Personen mit verschiedenen Namen und Paare, bei denen der
+    Nutzer schon "Nein" gesagt hat."""
+    s = schwellen(einstellungen)
+    zeilen = db.abfrage("SELECT g.person_id, g.vektor, p.name FROM gesichter g JOIN personen p ON p.id=g.person_id "
+                        "WHERE g.ignoriert=0 AND g.modell=?", (GESICHT_KENNUNG,))
+    summen: dict[int, np.ndarray] = {}
+    anzahl: dict[int, int] = {}
+    namen: dict[int, str | None] = {}
+    for z in zeilen:
+        v = blob_zu_vektor(z["vektor"])
+        v = v / (np.linalg.norm(v) + 1e-9)
+        summen[z["person_id"]] = summen.get(z["person_id"], 0) + v
+        anzahl[z["person_id"]] = anzahl.get(z["person_id"], 0) + 1
+        namen[z["person_id"]] = z["name"]
+    pids = [p for p in summen if anzahl[p] >= 2 or namen[p]]
+    if len(pids) < 2:
+        return []
+    zentren = _norm(np.stack([summen[p] for p in pids]))
+    sims = zentren @ zentren.T
+    verschieden = _verschieden(db)
+    paare = []
+    for i, j in zip(*np.where(np.triu(sims, 1) >= s["vorschlag"])):
+        a, b = pids[i], pids[j]
+        if (namen[a] and namen[b]) or _paar(a, b) in verschieden:
+            continue
+        paare.append((float(sims[i, j]), a, b))
+    paare.sort(reverse=True)
+    liste = {p["id"]: p for p in personen_liste(db, min_anzahl=1)}
+    erg = []
+    for sim, a, b in paare:
+        if a in liste and b in liste:
+            # benannte bzw. größere Gruppe zuerst: sie bleibt beim Zusammenführen
+            x, y = sorted((liste[a], liste[b]), key=lambda p: (p["name"] is None, -p["bilder"]))
+            erg.append({"a": x, "b": y, "aehnlichkeit": round(sim, 3)})
+        if len(erg) >= limit:
+            break
+    return erg
+
+
+def verschieden_merken(db: Datenbank, a: int, b: int) -> None:
+    """Nutzer sagt: verschiedene Personen. Nie wieder vorschlagen oder automatisch vereinen."""
+    with db.verbindung() as con:
+        con.execute("INSERT OR IGNORE INTO personen_verschieden VALUES (?,?)", _paar(a, b))
+        _festhalten(con, a)
+        _festhalten(con, b)
 
 
 def neue_gesichter_zuordnen(db: Datenbank, einstellungen: dict | None = None) -> int:
@@ -385,10 +512,17 @@ def _vertreter(db: Datenbank, person_id: int, anzahl: int = 5) -> list[int]:
     return [int(zeilen[i]["id"]) for i in reihe[:anzahl]]
 
 
-def zusammenfuehren(db: Datenbank, ziel_id: int, quell_ids: list[int]) -> None:
+def zusammenfuehren(db: Datenbank, ziel_id: int, quell_ids: list[int]) -> int:
     """Personen vereinen. Ein paar typische Gesichter jeder Gruppe gelten danach als bestätigt:
     sonst würde das nächste Neugruppieren die kleinere Gruppe wieder abtrennen, wenn sie anders
     aussieht (anderes Alter, Brille ...)."""
+    # Der Name soll nicht verloren gehen: ist das Ziel unbenannt, eine benannte Quelle als Ziel nehmen
+    alle = [ziel_id, *[q for q in quell_ids if q != ziel_id]]
+    benannt = {z["id"] for z in db.abfrage(
+        f"SELECT id FROM personen WHERE name IS NOT NULL AND id IN ({','.join('?' * len(alle))})", alle)}
+    if ziel_id not in benannt and benannt:
+        ziel_id = next(i for i in alle if i in benannt)
+    quell_ids = [i for i in alle if i != ziel_id]
     vertreter = [g for p in [ziel_id, *quell_ids] for g in _vertreter(db, p)]
     with db.verbindung() as con:
         con.executemany("UPDATE gesichter SET person_fest=1 WHERE id=?", [(g,) for g in vertreter])
@@ -396,9 +530,14 @@ def zusammenfuehren(db: Datenbank, ziel_id: int, quell_ids: list[int]) -> None:
             if q != ziel_id:
                 con.execute("UPDATE gesichter SET person_id=? WHERE person_id=?", (ziel_id, q))
                 con.execute("UPDATE OR IGNORE gesicht_abgelehnt SET person_id=? WHERE person_id=?", (ziel_id, q))
+                for a, b in con.execute("SELECT a, b FROM personen_verschieden WHERE a=? OR b=?", (q, q)).fetchall():
+                    andere = b if a == q else a
+                    if andere != ziel_id:
+                        con.execute("INSERT OR IGNORE INTO personen_verschieden VALUES (?,?)", _paar(ziel_id, andere))
                 con.execute("DELETE FROM personen WHERE id=?", (q,))
         _festhalten(con, ziel_id)
     db.suchtext_aktualisieren_viele(_bilder_von(db, [ziel_id]))  # Name gilt jetzt auch für diese Bilder
+    return ziel_id
 
 
 def _bilder_der_gesichter(db: Datenbank, gesicht_ids: list[int]) -> list[int]:
