@@ -25,7 +25,7 @@ function Ende($code) {
     exit $code
 }
 
-Write-Host "ImgSortSearch-Update (Skriptstand 2026-11-27b)" -ForegroundColor DarkGray
+Write-Host "ImgSortSearch-Update (Skriptstand 2026-11-27c)" -ForegroundColor DarkGray
 try {
     # Laeuft das Programm noch? Dann koennen Dateien nicht sauber ersetzt werden.
     $py = Join-Path $Umg "venv\Scripts"
@@ -74,7 +74,8 @@ try {
         if (-not $neu) { throw "GitHub hat keinen Stand geliefert" }
         $sauber = -not (Text (& $git status --porcelain --untracked-files=no))
         if ($vorher -eq $neu -and $sauber) {
-            Write-Host "Schon auf dem neuesten Stand." -ForegroundColor Green
+            Write-Host "Schon auf dem neuesten Stand:" -ForegroundColor Green
+            & $git log -1 --format="  %h  %cd  %s" --date=format:"%d.%m.%Y %H:%M"
         } else {
             # Programmdateien auf den GitHub-Stand setzen (wie git pull, aber ohne Konflikte).
             # "umgebung" und "daten" stehen in .gitignore und bleiben unberuehrt.
