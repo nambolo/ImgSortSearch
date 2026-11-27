@@ -69,6 +69,11 @@ def main(argv=None) -> int:
             import webview  # pywebview: eigenes Fenster (unter Windows mit Edge WebView2)
         except ImportError:
             webview = None
+    if webview is not None and _nur_alter_internet_explorer():
+        # Ohne Edge-WebView2 nimmt pywebview den alten Internet Explorer: die Oberfläche bliebe dort leer
+        logging.getLogger(__name__).warning("Edge WebView2 fehlt, öffne den Browser. Abhilfe: 'WebView2 Runtime' "
+                                            "von microsoft.com installieren.")
+        webview = None
     if webview is not None:
         try:
             fenster = webview.create_window("ImgSortSearch", url, width=1440, height=900, min_size=(960, 640),
@@ -90,6 +95,17 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         pass
     return _beenden(zustand, server, t)
+
+
+def _nur_alter_internet_explorer() -> bool:
+    """True, wenn pywebview unter Windows mangels WebView2 auf MSHTML (Internet Explorer) ausweichen würde."""
+    if sys.platform != "win32":
+        return False
+    try:
+        from webview.platforms import winforms  # entscheidet beim Import, welche Engine es nimmt
+        return getattr(winforms, "renderer", "") == "mshtml"
+    except Exception:  # Prüfung nicht möglich: pywebview selbst entscheiden lassen
+        return False
 
 
 def _beenden(zustand, server, t) -> int:

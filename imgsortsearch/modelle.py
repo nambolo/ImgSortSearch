@@ -37,21 +37,68 @@ def modell_ordner() -> Path:
     return p
 
 
-def lade_datei(urls: list[str], ziel: Path) -> Path:
+def lade_datei(urls: list[str], ziel: Path, stopp: threading.Event | None = None) -> Path:
+    """Lädt eine Datei (erste Quelle, die klappt). Ein abgebrochener Download bleibt als ``.part``
+    liegen und wird beim nächsten Versuch fortgesetzt statt von vorn begonnen."""
     if ziel.exists() and ziel.stat().st_size > 0:
         return ziel
     letzter = None
+    tmp = ziel.with_name(ziel.name + ".part")
     for url in urls:
         try:
             log.info("Lade %s", url)
-            tmp = ziel.with_suffix(ziel.suffix + ".part")
-            with urllib.request.urlopen(url, timeout=120) as r, open(tmp, "wb") as f:
-                shutil.copyfileobj(r, f)
+            _teil_laden(url, tmp, stopp=stopp)
             tmp.replace(ziel)
             return ziel
+        except InterruptedError:
+            raise
         except Exception as e:  # nächste Quelle probieren
             letzter = e
     raise RuntimeError(f"Modell konnte nicht geladen werden ({ziel.name}): {letzter}")
+
+
+def _teil_laden(url: str, teil: Path, groesse: int = 0, fortschritt=None, stopp: threading.Event | None = None):
+    """Lädt ``url`` in die Datei ``teil`` und setzt dabei einen früheren Teil-Download fort (HTTP-Range).
+
+    ``groesse`` (falls bekannt) wird geprüft; ``fortschritt(bytes)`` meldet den Stand."""
+    import urllib.error
+    start = teil.stat().st_size if teil.exists() else 0
+    if groesse and start > groesse:
+        teil.unlink()
+        start = 0
+    if groesse and start == groesse:
+        return  # schon vollständig, nur noch nicht umbenannt
+    kopf = {"User-Agent": "ImgSortSearch/1.0"}
+    if start:
+        kopf["Range"] = f"bytes={start}-"
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(url, headers=kopf), timeout=120)
+    except urllib.error.HTTPError as e:
+        if e.code != 416 or not start:
+            raise
+        # Bereich nicht erfüllbar: der Teil ist schon komplett (Größe unbekannt) oder kaputt -> von vorn
+        teil.unlink()
+        return _teil_laden(url, teil, groesse, fortschritt, stopp)
+    with r:
+        if start and r.status != 206:  # Server kann nicht fortsetzen: von vorn
+            start = 0
+        if not groesse:
+            laenge = r.headers.get("Content-Length")
+            groesse = start + int(laenge) if laenge and laenge.isdigit() else 0
+        with open(teil, "ab" if start else "wb") as f:
+            geladen = start
+            while True:
+                if stopp is not None and stopp.is_set():
+                    raise InterruptedError
+                block = r.read(1 << 20)
+                if not block:
+                    break
+                f.write(block)
+                geladen += len(block)
+                if fortschritt:
+                    fortschritt(geladen)
+    if groesse and teil.stat().st_size != groesse:
+        raise RuntimeError(f"{teil.name} unvollständig ({teil.stat().st_size} von {groesse} Bytes)")
 
 
 # ------------------------------------------------------------------ Bilder
@@ -126,11 +173,32 @@ def waehle_geraet(wunsch: str = "auto"):
         try:
             import torch_directml
             if torch_directml.is_available():
-                return torch_directml.device(), f"DirectML ({torch_directml.device_name(torch_directml.default_device())})"
+                namen = [torch_directml.device_name(i) for i in range(torch_directml.device_count())]
+                i = dml_karte_waehlen(namen)
+                return torch_directml.device(i), f"DirectML ({namen[i]})"
         except Exception as e:  # Paket fehlt oder Treiber zu alt
             if wunsch == "directml":
                 log.warning("DirectML nicht verfügbar: %s", e)
     return "cpu", "CPU (Prozessor)"
+
+
+def dml_karte_waehlen(namen: list[str]) -> int:
+    """Index der DirectML-Grafikkarte, die am meisten taugt.
+
+    Ist neben der eigentlichen Grafikkarte noch die Prozessorgrafik aktiv (Intel UHD, AMD Radeon Graphics),
+    zählt Windows oft diese zuerst. Dedizierte Karten (Radeon RX/Pro, NVIDIA, Intel Arc) gehen vor,
+    der Software-Treiber "Microsoft Basic Render Driver" zuletzt."""
+    import re
+
+    def wert(name: str) -> int:
+        if re.search(r"Microsoft|Basic Render", name, re.I):
+            return 0
+        if re.search(r"NVIDIA|Radeon\s*(\(TM\)\s*)?(RX|Pro|VII)|\bArc\b|FirePro", name, re.I):
+            return 2
+        return 1
+    if not namen:
+        return 0
+    return max(range(len(namen)), key=lambda i: (wert(namen[i]), -i))
 
 
 class _GeraetMitRueckfall:
@@ -611,7 +679,14 @@ class ModellDownload:
             raise ValueError(f"Unbekanntes Modell: {modell}")
         with self._lock:
             if self._thread and self._thread.is_alive():
-                return False
+                if self.status.get("modell") == modell:
+                    return False
+                # anderes Modell gewählt: den laufenden Download anhalten (der Teil bleibt und wird
+                # später fortgesetzt) und das neu gewählte laden, sonst käme es nie an
+                self._stop.set()
+                self._thread.join(60)
+                if self._thread.is_alive():
+                    return False
             if ausfuehrlich_vorhanden(modell):
                 self.status.update(modell=modell, laeuft=False, abgeschlossen=True, fehler="")
                 return False
@@ -677,27 +752,10 @@ class ModellDownload:
     def _datei_laden(self, url: str, datei: Path, groesse: int, davor: int):
         """Lädt in eine .part-Datei und setzt einen abgebrochenen Download fort."""
         teil = datei.with_name(datei.name + ".part")
-        start = teil.stat().st_size if teil.exists() else 0
-        if groesse and start > groesse:
-            teil.unlink()
-            start = 0
-        anfrage = urllib.request.Request(url, headers={"Range": f"bytes={start}-"} if start else {})
-        with urllib.request.urlopen(anfrage, timeout=120) as r:
-            if start and r.status != 206:  # Server kann nicht fortsetzen: von vorn
-                start = 0
-            with open(teil, "ab" if start else "wb") as f:
-                geladen = start
-                while True:
-                    if self._stop.is_set():
-                        raise InterruptedError
-                    block = r.read(1 << 20)
-                    if not block:
-                        break
-                    f.write(block)
-                    geladen += len(block)
-                    self.status["fertig"] = davor + geladen
-        if groesse and teil.stat().st_size != groesse:
-            raise RuntimeError(f"{datei.name} unvollständig ({teil.stat().st_size} von {groesse} Bytes)")
+
+        def melden(geladen):
+            self.status["fertig"] = davor + geladen
+        _teil_laden(url, teil, groesse, fortschritt=melden, stopp=self._stop)
         teil.replace(datei)
 
 
