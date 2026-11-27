@@ -495,19 +495,25 @@ class Indexer:
         # Die Bibliotheken (Pillow, OpenCV, onnxruntime, PyTorch) geben dabei den Python-Lock frei.
         from concurrent.futures import ThreadPoolExecutor
         lader = ThreadPoolExecutor(max_workers=LADE_THREADS, thread_name_prefix="bild-laden")
-        nach = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gesichter-ocr")
+        nach = ThreadPoolExecutor(max_workers=2, thread_name_prefix="gesichter-ocr")  # Gesichter | Text
+        tensoren: dict = {}      # schon in den Lade-Threads vorbereitete Eingaben fürs Bildmodell
         vorrat: list = []        # Futures der vorgeladenen Stapel (je Stapel eine Liste)
-        laufend = None           # Gesichter/OCR des vorigen Stapels
+        laufend = None           # (Stapel, [Futures]) Gesichter/OCR des vorigen Stapels
         fertig = {"n": 0, "lock": threading.Lock()}
 
         def vorladen():
             while len(vorrat) < VORLADEN_STAPEL and naechster[0] < len(stapel_liste):
-                vorrat.append([lader.submit(self._bild_vorbereiten, z, zeiten) for z in stapel_liste[naechster[0]]])
+                vorrat.append([lader.submit(self._bild_vorbereiten, z, zeiten, clip, tensoren) for z in stapel_liste[naechster[0]]])
                 naechster[0] += 1
 
         def nach_abwarten():
             if laufend is not None:
-                laufend.result()  # Fehler darin sind schon je Bild abgefangen
+                stapel_fertig, futures = laufend
+                for f in futures:
+                    f.result()  # Fehler darin sind schon je Bild abgefangen
+                self.db.suchtext_aktualisieren_viele([z["id"] for z, _ in stapel_fertig])
+                with fertig["lock"]:
+                    fertig["n"] += len(stapel_fertig)
                 dauer = time.time() - t0
                 rest = (len(offen) - fertig["n"]) * dauer / max(1, fertig["n"])
                 self._setze(fertig=fertig["n"], meldung=f"Analysiere Bilder ... noch etwa {_dauer_text(rest)}")
@@ -534,7 +540,7 @@ class Indexer:
                 vek_map = {}
                 if brauchen_clip:
                     with zeiten.messen("clip", len(brauchen_clip)):
-                        vek = clip.bilder([img for _, img in brauchen_clip])
+                        vek = clip.bilder([tensoren.pop(z["id"], img) for z, img in brauchen_clip])
                     pt = modelle.softmax(vek @ text_vek.T)[:, :n_text].sum(axis=1)
                     with self.db.verbindung() as v:
                         for (z, _), x, t in zip(brauchen_clip, vek, pt):
@@ -559,12 +565,20 @@ class Indexer:
                 # Gesichter und Text des vorigen Stapels müssen fertig sein, bevor dieser startet
                 with zeiten.messen("warten_auf_gesichter_ocr"):
                     nach_abwarten()
-                laufend = nach.submit(self._gesichter_und_text, geladen, vek_map, gesichter, ocr, zeiten, fertig)
+                for z, _ in geladen:
+                    tensoren.pop(z["id"], None)
+                laufend = (geladen, [nach.submit(self._gesichter_stapel, geladen, gesichter, zeiten),
+                                     nach.submit(self._text_stapel, geladen, vek_map, ocr, zeiten)])
                 zeiten.stapel_fertig(len(geladen))
             nach_abwarten()
             laufend = None
             self._setze(fertig=len(offen))
         finally:
+            if laufend is not None:  # angehalten: angefangenen Stapel noch sauber abschließen
+                try:
+                    nach_abwarten()
+                except Exception:
+                    log.exception("Abschluss des letzten Stapels")
             for liste in vorrat:
                 for f in liste:
                     f.cancel()
@@ -572,53 +586,63 @@ class Indexer:
             nach.shutdown(wait=True)
             zeiten.protokollieren(endgueltig=True)
 
-    def _bild_vorbereiten(self, z, zeiten: "Zeitmessung"):
-        """Bild öffnen, verkleinern und Vorschau speichern (läuft in einem Lade-Thread)."""
+    def _bild_vorbereiten(self, z, zeiten: "Zeitmessung", clip=None, tensoren: dict | None = None):
+        """Bild öffnen, verkleinern, Vorschau speichern und fürs Bildmodell vorbereiten (läuft in einem
+        Lade-Thread, damit die Grafikkarte nicht auf den Prozessor warten muss)."""
         if self._stop.is_set():
             return None
         try:
             with zeiten.messen("laden"):
                 img = modelle.bild_laden(Path(z["pfad"]), max_kante=2000)
                 vorschau_erzeugen(z["id"], img)
+            if tensoren is not None and not z["schritt_clip"] and hasattr(clip, "vorbereiten"):
+                with zeiten.messen("clip_vorbereiten"):
+                    tensoren[z["id"]] = clip.vorbereiten(img)
             return z, img
         except Exception as ex:
             with self.db.verbindung() as v:
                 v.execute("UPDATE bilder SET fehler=? WHERE id=?", (str(ex)[:300], z["id"]))
             return None
 
-    def _gesichter_und_text(self, geladen, vek_map, gesichter, ocr, zeiten: "Zeitmessung", fertig: dict):
-        """Gesichter, Texterkennung und Suchtext für einen Stapel (läuft im Gesichter/OCR-Thread)."""
+    def _gesichter_stapel(self, geladen, gesichter, zeiten: "Zeitmessung"):
+        """Gesichter für einen Stapel (eigener Thread, parallel zur Texterkennung)."""
+        if not gesichter:
+            return
+        for z, img in geladen:
+            if z["schritt_gesichter"]:
+                continue
+            try:
+                with zeiten.messen("gesichter"):
+                    gef = gesichter.finde(img)
+                bw, bh = img.size  # Boxen relativ (0..1) speichern
+                self._gesichter_speichern(z["id"], gef, bw, bh, getattr(gesichter, "kennung", modelle.GESICHT_KENNUNG))
+            except Exception as ex:
+                self._fehler(f"Gesichter {Path(z['pfad']).name}: {ex}")
+
+    def _text_stapel(self, geladen, vek_map, ocr, zeiten: "Zeitmessung"):
+        """Texterkennung für einen Stapel (eigener Thread, parallel zu den Gesichtern)."""
+        if not ocr:
+            return
         e = self.e
         for z, img in geladen:
-            if gesichter and not z["schritt_gesichter"]:
+            if z["schritt_ocr"]:
+                continue
+            text = ""
+            textlastig = vek_map.get(z["id"])
+            if textlastig is None:
+                r = self.db.eins("SELECT textlastig FROM bilder WHERE id=?", (z["id"],))
+                textlastig = r["textlastig"] or 0
+            pfad = Path(z["pfad"])
+            lohnt = (e["ocr"]["modus"] == "alle" or textlastig >= 0.5
+                     or pfad.suffix.lower() in TEXT_ENDUNGEN or "screenshot" in pfad.name.lower())
+            if lohnt:
                 try:
-                    with zeiten.messen("gesichter"):
-                        gef = gesichter.finde(img)
-                    bw, bh = img.size  # Boxen relativ (0..1) speichern
-                    self._gesichter_speichern(z["id"], gef, bw, bh,
-                                              getattr(gesichter, "kennung", modelle.GESICHT_KENNUNG))
+                    with zeiten.messen("ocr"):
+                        text = ocr.lesen(img)
                 except Exception as ex:
-                    self._fehler(f"Gesichter {Path(z['pfad']).name}: {ex}")
-            if ocr and not z["schritt_ocr"]:
-                text = ""
-                textlastig = vek_map.get(z["id"])
-                if textlastig is None:
-                    r = self.db.eins("SELECT textlastig FROM bilder WHERE id=?", (z["id"],))
-                    textlastig = r["textlastig"] or 0
-                pfad = Path(z["pfad"])
-                lohnt = (e["ocr"]["modus"] == "alle" or textlastig >= 0.5
-                         or pfad.suffix.lower() in TEXT_ENDUNGEN or "screenshot" in pfad.name.lower())
-                if lohnt:
-                    try:
-                        with zeiten.messen("ocr"):
-                            text = ocr.lesen(img)
-                    except Exception as ex:
-                        self._fehler(f"Texterkennung {pfad.name}: {ex}")
-                with self.db.verbindung() as v:
-                    v.execute("UPDATE bilder SET ocr_text=?, schritt_ocr=1 WHERE id=?", (text, z["id"]))
-            self.db.suchtext_aktualisieren(z["id"])
-            with fertig["lock"]:
-                fertig["n"] += 1
+                    self._fehler(f"Texterkennung {pfad.name}: {ex}")
+            with self.db.verbindung() as v:
+                v.execute("UPDATE bilder SET ocr_text=?, schritt_ocr=1 WHERE id=?", (text, z["id"]))
 
     # ---------------------------------------------------------- Schritt 3 (optional)
 

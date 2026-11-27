@@ -352,13 +352,19 @@ class ClipModell(_GeraetMitRueckfall):
         except Exception as e:
             log.info("Probelauf des Bildmodells nicht möglich: %s", e)
 
-    def bilder(self, bilder: list[Image.Image]) -> np.ndarray:
+    def bilder(self, bilder: list) -> np.ndarray:
+        """Bildvektoren. Statt PIL-Bildern gehen auch schon vorbereitete Tensoren (siehe ``vorbereiten``)."""
         return self._mit_rueckfall(lambda: self._bilder(bilder))
+
+    def vorbereiten(self, bild: Image.Image):
+        """Bild auf 224x224 bringen und normieren (Prozessor). Läuft beim Indexlauf schon in den Lade-Threads,
+        damit die Grafikkarte nicht darauf warten muss."""
+        return self.preprocess(bild)
 
     def _bilder(self, bilder):
         torch = self.torch
         with torch.no_grad():
-            x = torch.stack([self.preprocess(b) for b in bilder]).to(self.geraet)
+            x = torch.stack([b if isinstance(b, torch.Tensor) else self.preprocess(b) for b in bilder]).to(self.geraet)
             f = self.model.encode_image(x).float()
             f = f / f.norm(dim=-1, keepdim=True)
         return f.cpu().numpy()
@@ -457,6 +463,50 @@ def det_feste_groesse(quelle: Path, eingabe: int) -> Path:
     return ziel
 
 
+def rec_ohne_flache_batchnorm(quelle: Path) -> Path:
+    """ArcFace für DirectML: Die letzte BatchNormalization folgt auf eine vollverbundene Schicht (2-dimensionale
+    Daten); DirectML lehnt BatchNormalization dort ab ("Falscher Parameter"). Sie wird durch dieselbe Rechnung
+    als Multiplikation und Addition mit festen Werten ersetzt."""
+    import onnx
+    from onnx import helper, numpy_helper
+    ziel = quelle.with_name(f"{quelle.stem}_dml.onnx")
+    if ziel.exists() and ziel.stat().st_mtime >= quelle.stat().st_mtime:
+        return ziel
+    m = onnx.load(str(quelle))
+    werte = {x.name: numpy_helper.to_array(x) for x in m.graph.initializer}
+    erzeuger = {o: n for n in m.graph.node for o in n.output}
+    neu, geaendert = [], 0
+    for n in m.graph.node:
+        vor = erzeuger.get(n.input[0])
+        if n.op_type == "BatchNormalization" and vor is not None and vor.op_type in ("Gemm", "MatMul", "Flatten"):
+            eps = next((a.f for a in n.attribute if a.name == "epsilon"), 1e-5)
+            g, b, mu, var = (werte[i].astype(np.float64) for i in n.input[1:5])
+            faktor = (g / np.sqrt(var + eps)).astype(np.float32)
+            versatz = (b - mu * g / np.sqrt(var + eps)).astype(np.float32)
+            fn, vn = f"{n.name}_faktor", f"{n.name}_versatz"
+            m.graph.initializer.extend([numpy_helper.from_array(faktor, fn), numpy_helper.from_array(versatz, vn)])
+            zw = f"{n.name}_mal"
+            neu += [helper.make_node("Mul", [n.input[0], fn], [zw], name=f"{n.name}_Mul"),
+                    helper.make_node("Add", [zw, vn], [n.output[0]], name=f"{n.name}_Add")]
+            geaendert += 1
+        else:
+            neu.append(n)
+    if not geaendert:
+        return quelle
+    del m.graph.node[:]
+    m.graph.node.extend(neu)
+    for t in list(m.graph.input[:1]) + list(m.graph.output):  # Stapelgröße variabel (Original: fest 1 am Ausgang)
+        d = t.type.tensor_type.shape.dim
+        if len(d):
+            d[0].ClearField("dim_value")
+            d[0].dim_param = "N"
+    tmp = ziel.with_name(ziel.name + ".part")
+    onnx.save(m, str(tmp))
+    tmp.replace(ziel)
+    log.info("Gesichtsmerkmale für DirectML angepasst (%d BatchNormalization ersetzt)", geaendert)
+    return ziel
+
+
 def _aehnlichkeits_transformation(quelle: np.ndarray, ziel: np.ndarray) -> np.ndarray:
     """Drehung + Skalierung + Verschiebung (Umeyama), die die Punkte quelle bestmöglich auf ziel legt. 2x3."""
     mq, mz = quelle.mean(0), ziel.mean(0)
@@ -519,64 +569,79 @@ class GesichtsModell:
         self._anker: dict = {}
         self._lock = threading.Lock()
         self.geraet_name = "CPU (Prozessor)"
-        if (beschleunigung or "auto").lower() in ("auto", "directml") and self._dml_versuchen():
-            return
-        self._sitzungen(["CPUExecutionProvider"])
+        self.det = self._sitzung(self._dateien[0])
+        self.rec = self._sitzung(self._dateien[1])
+        self.det_in = self.det.get_inputs()[0].name
+        self.rec_in = self.rec.get_inputs()[0].name
+        self._auf_gpu: set[str] = set()
+        if (beschleunigung or "auto").lower() in ("auto", "directml"):
+            self._dml_versuchen()
 
-    def _sitzungen(self, anbieter: list, det: Path | None = None) -> None:
+    def _sitzung(self, pfad, dml_optionen: dict | None = None):
         import onnxruntime as ort
-        det, rec = det or self._dateien[0], self._dateien[1]
         opt = ort.SessionOptions()
         opt.log_severity_level = 3
-        if anbieter[0] == "CPUExecutionProvider":
+        if dml_optionen is None:
             opt.intra_op_num_threads = max(1, (os.cpu_count() or 2) - 1)
+            anbieter = ["CPUExecutionProvider"]
         else:  # DirectML verlangt das so
             opt.enable_mem_pattern = False
             opt.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-        self.det = ort.InferenceSession(str(det), opt, providers=anbieter)
-        self.rec = ort.InferenceSession(str(rec), opt, providers=anbieter)
-        self.det_in = self.det.get_inputs()[0].name
-        self.rec_in = self.rec.get_inputs()[0].name
+            anbieter = [("DmlExecutionProvider", dml_optionen), "CPUExecutionProvider"]
+        return ort.InferenceSession(str(pfad), opt, providers=anbieter)
 
-    def _dml_versuchen(self) -> bool:
-        """Gesichter auf der Grafikkarte (onnxruntime-directml, nur AMD/Intel-Installation). Klappt das nicht
-        oder rechnet es falsch, bleibt alles auf dem Prozessor."""
+    def _name_setzen(self):
+        if self._auf_gpu == {"det", "rec"}:
+            self.geraet_name = "DirectML (Grafikkarte)"
+        elif "det" in self._auf_gpu:
+            self.geraet_name = "DirectML (Finden), Prozessor (Wiedererkennen)"
+        elif "rec" in self._auf_gpu:
+            self.geraet_name = "Prozessor (Finden), DirectML (Wiedererkennen)"
+        elif not self.geraet_name.startswith("CPU ("):
+            self.geraet_name = "CPU (Prozessor)"
+
+    def _dml_versuchen(self) -> None:
+        """Gesichter auf der Grafikkarte (onnxruntime-directml, nur AMD/Intel-Installation), für Finden (SCRFD)
+        und Wiedererkennen (ArcFace) getrennt: Was DirectML nicht kann oder falsch rechnet, bleibt auf dem
+        Prozessor. Beide Modelle werden vorher so angepasst, dass DirectML sie annimmt (Ergebnis identisch)."""
         try:
             import onnxruntime as ort
             if "DmlExecutionProvider" not in ort.get_available_providers():
-                return False
+                return
+        except Exception:
+            return
+        rng = np.random.default_rng(0)
+        proben = {"det": rng.uniform(-1, 1, (1, 3, self.eingabe, self.eingabe)).astype(np.float32),
+                  "rec": rng.uniform(-1, 1, (2, 3, 112, 112)).astype(np.float32)}
+        anpassen = {"det": lambda p: det_feste_groesse(p, self.eingabe), "rec": rec_ohne_flache_batchnorm}
+        for name, original in (("det", self._dateien[0]), ("rec", self._dateien[1])):
             try:
-                det_dml = det_feste_groesse(Path(self._dateien[0]), self.eingabe)
+                pfad = anpassen[name](Path(original))
             except Exception as e:
-                log.info("Gesichtsdetektor mit fester Größe nicht möglich (%s), versuche das Original", e)
-                det_dml = None
+                log.info("Gesichtsmodell %s nicht angepasst (%s), versuche das Original", name, e)
+                pfad = original
+            eingang = self.det_in if name == "det" else self.rec_in
+            cpu = getattr(self, name).run(None, {eingang: proben[name]})
+            fehler = None
             for optionen in ({"performance_preference": "high_performance", "device_filter": "gpu"}, {}):
                 try:
-                    self._sitzungen([("DmlExecutionProvider", optionen), "CPUExecutionProvider"], det_dml)
-                    if self.det.get_providers()[0] == "DmlExecutionProvider":
+                    s = self._sitzung(pfad, optionen)
+                    if s.get_providers()[0] != "DmlExecutionProvider":
+                        continue
+                    gpu = s.run(None, {eingang: proben[name]})
+                    if not all(np.allclose(a, b, atol=2e-2, rtol=2e-2) for a, b in zip(gpu, cpu)):
+                        fehler = "rechnet abweichend"
                         break
+                    setattr(self, name, s)
+                    self._auf_gpu.add(name)
+                    fehler = None
+                    break
                 except Exception as e:
-                    log.info("Gesichter mit DirectML (%s) nicht möglich: %s", optionen or "Standard", e)
-            else:
-                return False
-            # Probe: dieselben Eingaben auf Grafikkarte und Prozessor müssen dasselbe ergeben
-            rng = np.random.default_rng(0)
-            det_x = rng.uniform(-1, 1, (1, 3, self.eingabe, self.eingabe)).astype(np.float32)
-            rec_x = rng.uniform(-1, 1, (2, 3, 112, 112)).astype(np.float32)
-            gpu = (self.det.run(None, {self.det_in: det_x})[0], self.rec.run(None, {self.rec_in: rec_x})[0])
-            dml_det, dml_rec = self.det, self.rec
-            self._sitzungen(["CPUExecutionProvider"])
-            cpu = (self.det.run(None, {self.det_in: det_x})[0], self.rec.run(None, {self.rec_in: rec_x})[0])
-            if not all(np.allclose(a, b, atol=2e-2, rtol=2e-2) for a, b in zip(gpu, cpu)):
-                log.warning("Gesichter mit DirectML rechnen abweichend, bleibe auf dem Prozessor")
-                return False
-            self.det, self.rec = dml_det, dml_rec
-            self.geraet_name = "DirectML (Grafikkarte)"
-            log.info("Gesichtserkennung läuft auf der Grafikkarte (DirectML)")
-            return True
-        except Exception as e:
-            log.warning("Gesichter mit DirectML nicht möglich, nutze den Prozessor: %s", e)
-            return False
+                    fehler = e
+            if fehler is not None:
+                log.warning("Gesichtsmodell %s mit DirectML nicht möglich, nutze den Prozessor: %s", name, fehler)
+        self._name_setzen()
+        log.info("Gesichtserkennung: %s", self.geraet_name)
 
     def _ausfuehren(self, sitzung: str, eingabe: np.ndarray):
         s = getattr(self, sitzung)
@@ -584,11 +649,13 @@ class GesichtsModell:
         try:
             return s.run(None, {name: eingabe})
         except Exception as e:
-            if self.geraet_name.startswith("CPU"):
+            if sitzung not in self._auf_gpu:
                 raise
             log.warning("Gesichter auf der Grafikkarte fehlgeschlagen, weiter auf dem Prozessor: %s", e)
-            self._sitzungen(["CPUExecutionProvider"])
+            setattr(self, sitzung, self._sitzung(self._dateien[0 if sitzung == "det" else 1]))
+            self._auf_gpu.discard(sitzung)
             self.geraet_name = f"CPU (Grafikkarte fehlgeschlagen: {str(e)[:120]})"
+            self._name_setzen()
             return getattr(self, sitzung).run(None, {name: eingabe})
 
     # --- Erkennung
