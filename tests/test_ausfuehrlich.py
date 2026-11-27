@@ -352,3 +352,26 @@ def test_beschreiber_uebersetzt_satzweise(heim, monkeypatch):
     de, en, saetze = b.beschreiben([Image.new("RGB", (8, 8))])[0]
     assert saetze == ["DE:A dog sits.", "DE:It is roh0."] and de == "DE:A dog sits. DE:It is roh0."
     assert en == "A dog sits. It is roh0."
+
+
+def test_anderes_modell_waehrend_download(heim, monkeypatch):
+    """Wird während eines Downloads das andere Modell gewählt, hält der alte an und das neue wird geladen."""
+    d = modelle.ModellDownload("http://127.0.0.1:9")
+    gestartet = []
+
+    def lauf(modell):
+        gestartet.append(modell)
+        try:
+            while not d._stop.wait(0.01):
+                pass
+            d.status["fehler"] = "abgebrochen"
+        finally:
+            d.status["laeuft"] = False
+    monkeypatch.setattr(d, "_lauf", lauf)
+    assert d.starten("microsoft/Florence-2-large")
+    assert d.starten("microsoft/Florence-2-large") is False  # dasselbe Modell läuft schon
+    assert d.starten("microsoft/Florence-2-base")
+    assert gestartet == ["microsoft/Florence-2-large", "microsoft/Florence-2-base"]
+    assert d.status["modell"] == "microsoft/Florence-2-base" and d.status["laeuft"]
+    d.abbrechen()
+    d.warten(5)

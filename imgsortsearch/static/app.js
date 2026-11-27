@@ -43,6 +43,7 @@ function frage(titel, html, jaText = "OK", drittesText = "", viertesText = "") {
       ok(w);
     };
     $("#dialog-ja").onclick = () => fertig(true);
+    $$("#dialog-text input").forEach((i) => i.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); fertig(true); } }));
     $("#dialog-nein").onclick = () => fertig(false);
     $("#dialog-drittes").onclick = () => fertig("drittes");
     $("#dialog-viertes").onclick = () => fertig("viertes");
@@ -171,9 +172,11 @@ async function ladeFilter() {
   fill($("#f-kamera"), f.kameras.filter(Boolean), "Alle Kameras");
   const o = $("#f-ort"), altOrt = o.value;
   const n = (x) => x.anzahl.toLocaleString("de");
+  const orte = [];
+  (f.orte || []).forEach((x) => { const da = orte.find((y) => y.name === x.name); if (da) da.anzahl += x.anzahl; else orte.push({ ...x }); });
   o.innerHTML = `<option value="">Alle Orte</option>`
     + ((f.laender || []).length ? `<optgroup label="Länder">${f.laender.map((l) => `<option value="land:${esc(l.name)}">${esc(l.name)} (${n(l)})</option>`).join("")}</optgroup>` : "")
-    + ((f.orte || []).length ? `<optgroup label="Orte">${f.orte.map((x) => `<option value="ort:${esc(x.name)}">${esc(x.name)} (${n(x)})</option>`).join("")}</optgroup>` : "");
+    + (orte.length ? `<optgroup label="Orte">${orte.map((x) => `<option value="ort:${esc(x.name)}">${esc(x.name)} (${n(x)})</option>`).join("")}</optgroup>` : "");
   o.value = altOrt;
   o.hidden = !(f.laender || []).length;
 }
@@ -345,7 +348,8 @@ async function neuBewerten(ids) {
     } else {
       await api("/api/einordnen", { method: "POST" });
       toast("Neu eingeordnet");
-      suchen(false, true);
+      if (S.bildSuche) await bilderNachladen(ids);  // Foto- oder Personensuche nicht verwerfen
+      else suchen(false, true);
     }
     status();
   } catch (e) { toast(e.message, true); }
@@ -369,16 +373,23 @@ function zeigeAusfuehrlich(a) {
   const box = $("#e-lang-box");
   box.hidden = !$("#e-lang").checked;
   const d = a.download || {};
-  const zeigeDl = d.laeuft || (d.fehler && d.modell === a.modell && !a.vorhanden);
+  // eingeschaltet, aber das gewählte Modell fehlt: Fortschritt, Fehler oder ein Knopf zum Laden
+  const fehlt = a.aktiv && !a.vorhanden;
+  const zeigeDl = d.laeuft || fehlt;
   $("#e-lang-download").hidden = !zeigeDl;
   if (zeigeDl) {
     const mb = (x) => Math.round(x / 1048576).toLocaleString("de");
+    const name = $(`#e-lang-modell option[value="${d.modell}"]`)?.textContent.split(":")[0] || "Modell";
+    const eigenerFehler = d.fehler && d.modell === a.modell;
     $("#e-lang-download-text").textContent = d.laeuft
-      ? `Modell wird heruntergeladen: ${mb(d.fertig)} von ${d.gesamt ? mb(d.gesamt) : "?"} MB`
-      : `Download ${d.fehler === "abgebrochen" ? "abgebrochen" : `fehlgeschlagen: ${d.fehler}`}. Bereits Geladenes bleibt und wird beim nächsten Versuch fortgesetzt.`;
-    $("#e-lang-balken").style.width = d.gesamt ? `${(100 * d.fertig) / d.gesamt}%` : "3%";
+      ? `${name} wird heruntergeladen: ${mb(d.fertig)} von ${d.gesamt ? mb(d.gesamt) : "?"} MB`
+      : eigenerFehler
+        ? `Download ${d.fehler === "abgebrochen" ? "abgebrochen" : `fehlgeschlagen: ${d.fehler}`}. Bereits Geladenes bleibt und wird beim nächsten Versuch fortgesetzt.`
+        : "Das gewählte Modell ist noch nicht geladen.";
+    $("#e-lang-balken").style.width = d.laeuft && d.gesamt ? `${(100 * d.fertig) / d.gesamt}%` : (d.laeuft ? "3%" : "0");
     $("#e-lang-abbrechen").hidden = !d.laeuft;
     $("#e-lang-neu-laden").hidden = !!d.laeuft;
+    $("#e-lang-neu-laden").textContent = eigenerFehler ? "Erneut versuchen" : "Jetzt laden";
   }
   const n = a.offen + a.fertig;
   const stufe = $("#e-lang-stufe").value;
@@ -434,17 +445,25 @@ async function kategorieSetzen(ids, kat) {
     if (S.modus === "liste" && S.fokus) zeigeDetail(S.fokus);
     toast(kat ? `${ids.length} Bild(er) → ${kat}` : `${ids.length} Bild(er) wieder automatisch`);
     if (!kat) {
-      if (S.bildSuche) {  // Fotosuche nicht verwerfen, nur die betroffenen Bilder neu laden
-        for (const id of ids) {
-          const b = await api(`/api/bild/${id}`);
-          const x = S.bilder.find((y) => y.id === id);
-          if (x) { x.kategorie = b.kategorie_auto || "Unklar"; x.manuell = false; }
-        }
-        zeichneErgebnis();
-        if (S.modus === "liste" && S.fokus) zeigeDetail(S.fokus);
-      } else suchen(false, true);
+      if (S.bildSuche) await bilderNachladen(ids);  // Fotosuche nicht verwerfen, nur die betroffenen Bilder neu laden
+      else suchen(false, true);
     }
   } catch (e) { toast(e.message, true); }
+}
+
+// Kategorie und Zusatzkategorien einzelner Bilder neu vom Server holen (Treffer der Foto- oder Personensuche
+// lassen sich nicht neu abfragen, ohne die Suche zu verwerfen)
+async function bilderNachladen(ids) {
+  for (const id of ids) {
+    const x = S.bilder.find((y) => y.id === id);
+    if (!x) continue;
+    const b = await api(`/api/bild/${id}`);
+    x.kategorie = b.kategorie_manuell || b.kategorie_auto || "Unklar";
+    x.manuell = !!b.kategorie_manuell;
+    if (b.zusatz) x.zusatz = b.zusatz;
+  }
+  zeichneErgebnis();
+  if (S.modus === "liste" && S.fokus) zeigeDetail(S.fokus);
 }
 $("#auswahl-auto").onclick = () => kategorieSetzen([...S.gewaehlt], null);
 $("#auswahl-weg").onclick = () => { S.gewaehlt.clear(); aktualisiereAuswahl(); };
@@ -619,9 +638,19 @@ $("#vollbild").onclick = () => { $("#vollbild").hidden = true; };
 /* ------------------------------------------------------------ Themen & Kategorien */
 
 let themenDaten = null;
+let themenGeaendert = false;  // ungespeicherte Änderungen bleiben beim Wechsel der Ansicht erhalten
 async function ladeThemen() {
-  themenDaten = await api("/api/themen");
+  if (!themenGeaendert || !themenDaten) themenDaten = await api("/api/themen");
   zeichneThemen();
+}
+function themenAenderung() {
+  themenGeaendert = true;
+  zeigeThemenStand();
+}
+function zeigeThemenStand() {
+  const k = $("#themen-speichern");
+  k.textContent = themenGeaendert ? "● Speichern & neu einordnen" : "Speichern & neu einordnen";
+  k.title = themenGeaendert ? "Es gibt ungespeicherte Änderungen" : "";
 }
 
 function zeichneThemen() {
@@ -630,9 +659,15 @@ function zeichneThemen() {
     `<div class="kat-eintrag ${k.zusatz ? "zusatz" : ""}"><input type="color" value="${esc(k.farbe || FARBEN[i % FARBEN.length])}" data-i="${i}"><span>${esc(k.name)}</span>
       <label class="kat-art" title="Zusatzkategorie: schließt andere Kategorien nicht aus, ein Bild kann mehrere davon haben"><input type="checkbox" data-zusatz="${i}" ${k.zusatz ? "checked" : ""}>zusätzlich</label>
       <button data-weg="${i}" title="Kategorie entfernen">✕</button></div>`).join("");
-  $$("#kat-liste input[type=color]").forEach((c) => c.oninput = () => { kats[c.dataset.i].farbe = c.value; });
-  $$("#kat-liste [data-zusatz]").forEach((c) => c.onchange = () => { kats[c.dataset.zusatz].zusatz = c.checked; zeichneThemen(); });
-  $$("#kat-liste [data-weg]").forEach((b) => b.onclick = () => { kats.splice(+b.dataset.weg, 1); zeichneThemen(); });
+  $$("#kat-liste input[type=color]").forEach((c) => c.oninput = () => { kats[c.dataset.i].farbe = c.value; themenAenderung(); });
+  $$("#kat-liste [data-zusatz]").forEach((c) => c.onchange = () => { kats[c.dataset.zusatz].zusatz = c.checked; themenAenderung(); zeichneThemen(); });
+  $$("#kat-liste [data-weg]").forEach((b) => b.onclick = () => {
+    const [weg] = kats.splice(+b.dataset.weg, 1);
+    // Themen, die auf die entfernte Kategorie zeigten, werden wieder reine Schlagwörter (sonst bliebe sie gespeichert)
+    themenDaten.themen.forEach((t) => { if (t.kategorie === weg.name) t.kategorie = ""; });
+    themenAenderung();
+    zeichneThemen();
+  });
   const opt = (k, wert) => `<option value="${esc(k.name)}" ${k.name === wert ? "selected" : ""}>${esc(k.name)}</option>`;
   const optionen = (wert) => `<option value="">nur Schlagwort</option>`
     + `<optgroup label="Kategorie">${kats.filter((k) => !k.zusatz).map((k) => opt(k, wert)).join("")}</optgroup>`
@@ -644,9 +679,10 @@ function zeichneThemen() {
       <div class="zeile zwischen"><select data-kat="${i}">${optionen(t.kategorie)}</select><button class="loeschen" data-weg="${i}" title="Thema löschen">Löschen</button></div>
       ${t.beispiele.length ? `<div class="bsp">${t.beispiele.map((id) => `<img loading="lazy" src="/api/vorschau/${id}" alt="">`).join("")}</div>` : ""}
     </div>`).join("");
-  $$("[data-prompt]").forEach((el) => el.onchange = () => { themenDaten.themen[el.dataset.prompt].prompt = el.value; });
-  $$("[data-kat]", $("#themen-gitter")).forEach((el) => el.onchange = () => { themenDaten.themen[el.dataset.kat].kategorie = el.value; zeichneThemen(); });
-  $$(".thema [data-weg]").forEach((el) => el.onclick = () => { themenDaten.themen.splice(+el.dataset.weg, 1); zeichneThemen(); });
+  $$("[data-prompt]").forEach((el) => el.onchange = () => { themenDaten.themen[el.dataset.prompt].prompt = el.value; themenAenderung(); });
+  $$("[data-kat]", $("#themen-gitter")).forEach((el) => el.onchange = () => { themenDaten.themen[el.dataset.kat].kategorie = el.value; themenAenderung(); zeichneThemen(); });
+  $$(".thema [data-weg]").forEach((el) => el.onclick = () => { themenDaten.themen.splice(+el.dataset.weg, 1); themenAenderung(); zeichneThemen(); });
+  zeigeThemenStand();
   $$("[data-zeige]").forEach((el) => el.onclick = async () => {
     const t = themenDaten.themen[el.dataset.zeige];
     await ladeFilter().catch(() => {});
@@ -660,24 +696,32 @@ function farbeAus(kats, name) { const i = kats.findIndex((k) => k.name === name)
 
 $("#kat-neu").onclick = () => {
   const n = $("#neue-kat").value.trim();
-  if (!n || themenDaten.kategorien.some((k) => k.name === n)) return;
+  if (!n) return;
+  if (n === "Unklar" || themenDaten.kategorien.some((k) => k.name.toLowerCase() === n.toLowerCase())) { toast(`Die Kategorie „${n}“ gibt es schon.`, true); return; }
   const neu = { name: n, farbe: FARBEN[themenDaten.kategorien.length % FARBEN.length] };
   if ($("#neue-kat-zusatz").checked) neu.zusatz = true;
   themenDaten.kategorien.push(neu);
   $("#neue-kat").value = "";
+  themenAenderung();
   zeichneThemen();
 };
+$("#neue-kat").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#kat-neu").click(); });
 $("#thema-neu").onclick = () => {
   const n = $("#neues-thema").value.trim();
   if (!n) return;
+  if (themenDaten.themen.some((t) => t.name.toLowerCase() === n.toLowerCase())) { toast(`Das Thema „${n}“ gibt es schon.`, true); return; }
   themenDaten.themen.unshift({ name: n, prompt: $("#neues-thema-prompt").value.trim() || n, kategorie: "", anzahl: 0, beispiele: [] });
   $("#neues-thema").value = $("#neues-thema-prompt").value = "";
+  themenAenderung();
   zeichneThemen();
 };
+["#neues-thema", "#neues-thema-prompt"].forEach((s) => $(s).addEventListener("keydown", (e) => { if (e.key === "Enter") $("#thema-neu").click(); }));
 $("#themen-speichern").onclick = async () => {
   const themen = themenDaten.themen.map(({ name, prompt, kategorie }) => ({ name, prompt, kategorie }));
   try {
     await api("/api/einstellungen", { json: { themen, kategorien: themenDaten.kategorien } });
+    themenGeaendert = false;
+    zeigeThemenStand();
     await ladeGrundlagen();
     toast("Gespeichert. Bilder werden neu eingeordnet …");
     setTimeout(() => { ladeThemen(); ladeFilter().catch(() => {}); suchen(); }, 1500);
@@ -845,7 +889,10 @@ function sortierFelder() {
 $$("input[name=modus]").forEach((r) => r.onchange = sortierFelder);
 $("#s-umbenennen").onchange = sortierFelder;
 
+let sortierFormular = false;  // schon ausgefüllt: Eingaben beim Wechsel der Ansicht behalten
 async function ladeSortieren() {
+  if (sortierFormular) { sortierNurZeichnen(); ladeProtokolle(); return; }
+  sortierFormular = true;
   const s = S.einst.sortieren;
   $(`input[name=modus][value=${s.modus}]`).checked = true;
   $("#s-ziel").value = s.ziel || "";
@@ -853,10 +900,16 @@ async function ladeSortieren() {
   $("#s-umbenennen").checked = !!s.umbenennen;
   $("#s-name").value = s.name;
   $("#s-tags").value = s.tags;
-  $("#s-nur").innerHTML = [...S.kategorien, "Unklar"].map((k) => `<label><input type="checkbox" value="${esc(k)}" ${k !== "Unklar" ? "checked" : ""}>${esc(k)}</label>`).join("")
-    + S.zusatz.map((k) => `<label title="Zusatzkategorie: Bilder damit zusätzlich mitnehmen"><input type="checkbox" value="${esc(k)}">+ ${esc(k)}</label>`).join("");
+  sortierNurZeichnen();
   sortierFelder();
   ladeProtokolle();
+}
+// Kategorien können sich inzwischen geändert haben; die Haken bleiben, neue Hauptkategorien sind angehakt
+function sortierNurZeichnen() {
+  const alt = new Map($$("#s-nur input").map((i) => [i.value, i.checked]));
+  const an = (k, standard) => (alt.has(k) ? alt.get(k) : standard) ? "checked" : "";
+  $("#s-nur").innerHTML = [...S.kategorien, "Unklar"].map((k) => `<label><input type="checkbox" value="${esc(k)}" ${an(k, k !== "Unklar")}>${esc(k)}</label>`).join("")
+    + S.zusatz.map((k) => `<label title="Zusatzkategorie: Bilder damit zusätzlich mitnehmen"><input type="checkbox" value="${esc(k)}" ${an(k, false)}>+ ${esc(k)}</label>`).join("");
 }
 
 async function ordnerWaehlen(feld) {
@@ -890,6 +943,7 @@ $("#s-ausfuehren").onclick = async () => {
     const ok = await frage("Wirklich ausführen?", `<b>${v.zaehler.ok.toLocaleString("de")}</b> Dateien werden ${wort}.<br>Der Lauf kann anschließend unter „Bisherige Läufe“ rückgängig gemacht werden.`, "Ausführen");
     if (!ok) return;
     await api("/api/sortieren/ausfuehren", { json: { einstellungen: s, nur: sortierNur() } });
+    S.einst.sortieren = { ...S.einst.sortieren, ...s };  // der Server merkt sich die Einstellungen ebenfalls
     S.sortiertLaeuft = true;
     $("#s-balken-box").hidden = false;
     toast("Läuft …");
@@ -900,7 +954,7 @@ async function ladeProtokolle() {
   const r = await api("/api/protokolle");
   $("#protokolle").innerHTML = r.protokolle.length ? r.protokolle.map((p) =>
     `<div class="protokoll ${p.rueckgaengig ? "zurueck" : ""}"><div><b>${esc(datumText(p.zeit))}</b><br><span class="hinweis">${esc(p.beschreibung)}</span></div>
-      ${p.rueckgaengig ? "<span class='hinweis'>rückgängig gemacht</span>" : `<button class="knopf leicht" data-p="${p.id}">Rückgängig</button>`}</div>`).join("")
+      ${p.rueckgaengig ? "<span class='hinweis'>rückgängig gemacht</span>" : `<button class="knopf leicht" data-p="${p.id}" data-art="${esc(p.beschreibung)}">Rückgängig</button>`}</div>`).join("")
     : `<div class="hinweis">Noch keine Läufe.</div>`;
   $$("#protokolle [data-p]").forEach((b) => b.onclick = async () => {
     try {
@@ -911,6 +965,12 @@ async function ladeProtokolle() {
       b.disabled = true;  // kein doppelter Klick während des Laufs
       await api(`/api/protokolle/${b.dataset.p}/rueckgaengig?echt=true`, { method: "POST" });
       toast("Rückgängig gemacht");
+      if (/^Dubletten/.test(b.dataset.art || "")) {
+        // aussortierte Bilder wurden aus dem Index genommen: zurückgelegt nimmt der Index sie wieder auf
+        await api("/api/index/start", { method: "POST" }).catch(() => {});
+        toast("Rückgängig gemacht. Die Bilder werden wieder in den Index aufgenommen …");
+        status();
+      }
       ladeProtokolle();
       suchen();
     } catch (e) { b.disabled = false; toast(e.message, true); }
@@ -1076,14 +1136,26 @@ $("#d-suchen").onclick = async () => {
 
 const TAGE = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
 let quellen = [];
+let einstGeaendert = false;  // ungespeicherte Eingaben beim Wechsel der Ansicht nicht verwerfen
+function einstStand() {
+  $("#e-speichern").textContent = einstGeaendert ? "● Speichern" : "Speichern";
+  $("#e-speichern").title = einstGeaendert ? "Es gibt ungespeicherte Änderungen" : "";
+}
+// Bilder-Ordner und ausführliche Beschreibungen werden sofort gespeichert, alles andere mit „Speichern“
+["input", "change"].forEach((art) => $("#ansicht-einstellungen").addEventListener(art, (ev) => {
+  if (ev.target.closest(".quellen, #e-quelle-neu, #e-lang, #e-lang-box")) return;
+  einstGeaendert = true;
+  einstStand();
+}));
 function ladeEinstellungen() {
+  if (einstGeaendert) { zeichneQuellen(); kartenSpeicher(); return; }
   const e = S.einst;
   quellen = [...e.quellen];
   zeichneQuellen();
   const az = e.arbeitszeit;
   $("#e-az-aktiv").checked = az.aktiv;
   $("#e-tage").innerHTML = TAGE.map((t, i) => `<button data-t="${i + 1}" class="${az.wochentage.includes(i + 1) ? "an" : ""}">${t}</button>`).join("");
-  $$("#e-tage button").forEach((b) => b.onclick = () => b.classList.toggle("an"));
+  $$("#e-tage button").forEach((b) => b.onclick = () => { b.classList.toggle("an"); einstGeaendert = true; einstStand(); });
   $("#e-von").value = az.von;
   $("#e-bis").value = az.bis;
   const opt = (wert) => `<option value="">nichts</option>` + S.kategorien.map((k) => `<option ${k === wert ? "selected" : ""}>${esc(k)}</option>`).join("");
@@ -1184,6 +1256,8 @@ $("#e-speichern").onclick = async () => {
   };
   try {
     S.einst = await api("/api/einstellungen", { json: neu });
+    einstGeaendert = false;
+    einstStand();
     toast("Gespeichert");
   } catch (e) { toast(e.message, true); }
 };
