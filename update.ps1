@@ -16,6 +16,9 @@ $Branch   = "main"
 $MinGitVersion = "2.54.0"
 
 function Schritt($text) { Write-Host ""; Write-Host "==> $text" -ForegroundColor Cyan }
+# Ausgabe eines Befehls immer als Text ("" statt $null, wenn er nichts ausgibt).
+# Achtung PowerShell 5.1: [string](& befehl) ohne Ausgabe ergibt $null, nicht "".
+function Text($ausgabe) { return (@($ausgabe) -join "`n").Trim() }
 function Ende($code) {
     Write-Host ""
     Read-Host "Fertig. Enter zum Schliessen" | Out-Null
@@ -61,12 +64,13 @@ try {
         }
         & $git config core.autocrlf false     # Dateien genau so wie auf GitHub (.bat mit Windows-Zeilenenden)
         & $git remote set-url origin $RepoUrl
-        $vorher = [string](& $git rev-parse --verify -q HEAD)   # leer, wenn frisch eingerichtet
+        $vorher = Text (& $git rev-parse --verify -q HEAD)   # leer, wenn frisch eingerichtet
         & $git fetch -q origin $Branch
         if ($LASTEXITCODE -ne 0) { throw "Download von GitHub fehlgeschlagen (Internet?)" }
-        $neu = ([string](& $git rev-parse FETCH_HEAD)).Trim()
-        $sauber = -not [string](& $git status --porcelain --untracked-files=no)
-        if ($vorher.Trim() -eq $neu -and $sauber) {
+        $neu = Text (& $git rev-parse FETCH_HEAD)
+        if (-not $neu) { throw "GitHub hat keinen Stand geliefert" }
+        $sauber = -not (Text (& $git status --porcelain --untracked-files=no))
+        if ($vorher -eq $neu -and $sauber) {
             Write-Host "Schon auf dem neuesten Stand." -ForegroundColor Green
         } else {
             # Programmdateien auf den GitHub-Stand setzen (wie git pull, aber ohne Konflikte).
@@ -90,7 +94,7 @@ try {
         # install.ps1 ist wiederholbar: Vorhandenes bleibt, nur Neues/Geaendertes wird geladen
         $merker = Join-Path $Umg "beschleunigung.txt"
         $args2 = @("-OhneModelle")
-        if (Test-Path $merker) { $args2 += @("-Beschleunigung", (Get-Content $merker -Raw).Trim()) }
+        if (Test-Path $merker) { $args2 += @("-Beschleunigung", (Text (Get-Content $merker -Raw))) }
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "install.ps1") @args2
         if ($LASTEXITCODE -ne 0) { throw "Pakete konnten nicht aktualisiert werden" }
     }
@@ -100,5 +104,7 @@ try {
 } catch {
     Write-Host ""
     Write-Host "FEHLER: $_" -ForegroundColor Red
+    Write-Host ("  in update.ps1, Zeile {0}: {1}" -f $_.InvocationInfo.ScriptLineNumber, "$($_.InvocationInfo.Line)".Trim()) -ForegroundColor DarkGray
+    Write-Host "  PowerShell $($PSVersionTable.PSVersion), git: $git" -ForegroundColor DarkGray
     Ende 1
 }
