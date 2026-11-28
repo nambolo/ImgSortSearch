@@ -25,6 +25,7 @@ from PIL import Image
 
 from . import modelle, papierkorb
 from .datenbank import Datenbank, blob_zu_vektor
+from .drossel import OHNE
 from .sortieren import _hash, _sidecars
 
 SCHEMA = """
@@ -79,6 +80,7 @@ class Suche:
         self.db = db
         self.vorschau_pfad = vorschau_pfad
         self.stop = stop
+        self.drossel = OHNE  # Rechner schonen: setzt der Server (Pausen nach jedem Bild)
         self.status = {"laeuft": False, "phase": "", "fertig": 0, "gesamt": 0, "meldung": ""}
 
     def _abbruch(self) -> bool:
@@ -125,7 +127,8 @@ class Suche:
             c = cache[i]
             if not c["sha1"]:
                 try:
-                    c["sha1"] = _hash(Path(info[i]["pfad"]))
+                    with self.drossel.arbeit(self.stop):
+                        c["sha1"] = _hash(Path(info[i]["pfad"]))
                     geaendert.append(c)
                 except OSError:
                     pass
@@ -152,12 +155,13 @@ class Suche:
             c = cache[z["id"]]
             if not c["dhash"]:
                 try:
-                    vp = self.vorschau_pfad(z["id"])
-                    if vp.exists():
-                        with Image.open(vp) as img:
-                            c["dhash"] = dhash(img)
-                    else:
-                        c["dhash"] = dhash(modelle.bild_laden(Path(z["pfad"]), max_kante=720))
+                    with self.drossel.arbeit(self.stop):
+                        vp = self.vorschau_pfad(z["id"])
+                        if vp.exists():
+                            with Image.open(vp) as img:
+                                c["dhash"] = dhash(img)
+                        else:
+                            c["dhash"] = dhash(modelle.bild_laden(Path(z["pfad"]), max_kante=720))
                     geaendert.append(c)
                 except Exception:
                     pass

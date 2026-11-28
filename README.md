@@ -34,6 +34,7 @@ Deinstallieren: den Ordner löschen.
 | Grafik | Beschleunigung |
 |---|---|
 | NVIDIA | CUDA |
+| kleine NVIDIA-Karte (unter 3,5 GB, z. B. GeForce 940MX) plus Prozessorgrafik | DirectML für beide |
 | AMD Radeon (z. B. RX 5600 XT) | DirectML |
 | Intel-Grafik im Laptop (Iris Xe, UHD, Arc) | DirectML, nutzt den gemeinsamen Arbeitsspeicher |
 | keine passende | Prozessor |
@@ -43,6 +44,27 @@ Deinstallieren: den Ordner löschen.
 Grafikkarte einen Rechenschritt nicht, wechselt das Programm von selbst auf den Prozessor und zeigt das an.
 Bildmodell, Beschreibungen und Übersetzung laufen auf der Grafikkarte; Gesichter und Texterkennung auf dem
 Prozessor (die sind auch so schnell). Sind Prozessorgrafik und Grafikkarte beide aktiv, nimmt DirectML die Grafikkarte.
+
+Bei „Automatisch“ zählt auch der Grafikspeicher: Passt ein Modell nicht in den eigenen Speicher der Karte, rechnet es
+auf der Prozessorgrafik (die den Arbeitsspeicher nutzt) oder, ohne Prozessorgrafik, auf dem Prozessor. Beim Bildmodell
+kommt dann nur der Bildteil auf die Karte, der Textteil für die Suchbegriffe bleibt beim Prozessor. Beispiel Laptop mit
+GeForce 940MX (2 GB) und Intel HD 620: Bildteil und Gesichter auf der 940MX, Beschreibungen auf der Intel-Grafik.
+Ältere NVIDIA-Karten, auf denen die aktuelle PyTorch-Version nicht rechnet, bekommen bei der Installation
+PyTorch 2.5.1; klappt CUDA gar nicht (meist alter Treiber), rechnet das Programm auf dem Prozessor.
+
+## Rechner schonen
+
+Standardmäßig an (Einstellungen > „Rechner schonen“). Beim Einlesen, Analysieren und bei der Dublettensuche läuft
+das Programm dann mit niedriger Priorität, nimmt weniger Threads und macht nach jedem Arbeitsschritt eine kurze
+Pause, damit Prozessor und Grafikkarte Zeit für anderes haben:
+
+| Stufe | rechnet etwa | Pause nach jedem Schritt |
+|---|---|---|
+| Etwas (Standard) | drei Viertel der Zeit | ein Drittel der Arbeitszeit |
+| Viel | die Hälfte der Zeit | so lang wie die Arbeitszeit |
+| aus (kein Häkchen) | volle Leistung | keine |
+
+Die Einstellung gilt sofort, auch während eines laufenden Indexlaufs (die Thread-Zahl ab dem nächsten Lauf).
 
 Öffnet sich statt des eigenen Fensters der Browser, fehlt die „Microsoft Edge WebView2 Runtime“ (bei Windows 10/11
 normalerweise dabei, sonst kostenlos bei microsoft.com). Das Programm funktioniert im Browser genauso.

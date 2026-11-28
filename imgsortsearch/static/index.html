@@ -301,6 +301,14 @@
               <option value="xpu">Intel Arc (XPU)</option>
               <option value="cpu">Nur Prozessor</option>
             </select><small>Bei Problemen mit der Grafikkarte wechselt das Programm von selbst auf den Prozessor.</small></div>
+          <label class="schalter"><input type="checkbox" id="e-drossel"><span></span>Rechner schonen (empfohlen)</label>
+          <div class="feld" id="e-drossel-box"><label>Wie viel Luft für andere Programme?</label>
+            <select id="e-drossel-stufe">
+              <option value="leicht">Etwas: rechnet etwa drei Viertel der Zeit</option>
+              <option value="stark">Viel: rechnet etwa die Hälfte der Zeit (langsamer)</option>
+            </select><small>Beim Einlesen und Analysieren läuft das Programm dann mit niedriger Priorität, mit weniger
+            Threads und kurzen Pausen, damit Prozessor und Grafikkarte noch Zeit für anderes haben.
+            Ohne Häkchen: volle Leistung.</small></div>
           <div class="feld"><label>Wie sicher muss die Einordnung sein? <span id="e-schwelle-wert"></span></label>
             <input type="range" id="e-schwelle" min="0.5" max="4" step="0.25"><small>Höher = mehr Bilder landen in „Unklar“ und werden nicht falsch einsortiert.</small></div>
           <h2 class="abstand">Karte</h2>

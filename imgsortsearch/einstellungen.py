@@ -81,6 +81,8 @@ STANDARD = {
         "kachel_url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
     },
     "beschleunigung": "auto",            # auto | cuda | directml | xpu | cpu
+    # Rechner schonen: niedrige Priorität, weniger Threads, Pausen (leicht ~75 %, stark ~50 %); siehe drossel.py
+    "drosselung": {"aktiv": True, "stufe": "leicht"},
     "port": 8765,
 }
 

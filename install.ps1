@@ -134,14 +134,39 @@ if (-not (Test-Path $Py)) { & $uv venv $Venv --python 3.12; Pruefe "Anlegen der 
 
 Schritt "3/6  Grafikkarte erkennen und PyTorch installieren"
 $karten = @()
-try { $karten = @(Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }) } catch { }
+$nvidiaMB = 0
+try {
+    $vc = @(Get-CimInstance Win32_VideoController)
+    $karten = @($vc | ForEach-Object { $_.Name })
+    # AdapterRAM ist ein 32-Bit-Wert (Karten ab 4 GB melden oft 4 GB oder weniger): reicht, um kleine Karten zu erkennen
+    $nv = $vc | Where-Object { $_.Name -match "NVIDIA" } | Select-Object -First 1
+    if ($nv -and $nv.AdapterRAM) { $nvidiaMB = [math]::Round([double]$nv.AdapterRAM / 1MB) }
+} catch { }
 if ($karten.Count) { Write-Host ("Gefundene Grafik: " + ($karten -join ", ")) }
+# Gewuenschte Variante merken: update.bat erkennt bei "auto" neu (z. B. nach Umbau oder neuer Regel)
+$wunschDatei = Join-Path $Umg "beschleunigung-wunsch.txt"
+$merkerAlt = Join-Path $Umg "beschleunigung.txt"
+if (-not (Test-Path $wunschDatei) -and $Beschleunigung -eq "nvidia" -and (Test-Path $merkerAlt) -and
+        "$(Get-Content $merkerAlt -Raw)".Trim() -eq "nvidia") {
+    # aeltere update.bat reicht die erkannte Variante weiter: einmal neu erkennen lassen
+    $Beschleunigung = "auto"
+}
+Set-Content -Path $wunschDatei -Value $Beschleunigung -Encoding ASCII
 if ($Beschleunigung -eq "auto") {
-    if ($karten -match "NVIDIA") { $Beschleunigung = "nvidia" }
+    $andere = @($karten | Where-Object { $_ -notmatch "NVIDIA" -and $_ -match "AMD|Radeon|Intel|Arc|Iris|UHD|HD Graphics" })
+    if ($karten -match "NVIDIA" -and $nvidiaMB -gt 0 -and $nvidiaMB -lt 3500 -and $andere.Count) {
+        # Laptop mit kleiner NVIDIA-Karte (z. B. GeForce 940MX, 2 GB) und Prozessorgrafik: DirectML kann beide
+        # nutzen. Kleine Modelle (Bildteil, Gesichter) rechnen auf der NVIDIA, grosse auf der Prozessorgrafik
+        # mit dem gemeinsamen Arbeitsspeicher. Mit CUDA blieben die grossen Modelle beim Prozessor.
+        Write-Host "NVIDIA mit $nvidiaMB MB Grafikspeicher und Prozessorgrafik gefunden: nutze DirectML fuer beide."
+        $Beschleunigung = "directml"
+    }
+    elseif ($karten -match "NVIDIA") { $Beschleunigung = "nvidia" }
     elseif ($karten -match "AMD|Radeon|Intel|Arc|Iris|UHD") { $Beschleunigung = "directml" }
     else { $Beschleunigung = "cpu" }
 }
 $constraints = Join-Path $Umg "constraints.txt"
+$torchAlt = Join-Path $Umg "torch-alt.txt"   # vorhanden: diese NVIDIA-Karte braucht PyTorch 2.5.1
 # Wurde vorher mit einer anderen Grafikkarten-Variante installiert, PyTorch austauschen
 # (sonst bleibt z. B. die DirectML-Version liegen, weil "torch" schon vorhanden ist)
 $merker = Join-Path $Umg "beschleunigung.txt"
@@ -149,11 +174,16 @@ $vorher = if (Test-Path $merker) { "$(Get-Content $merker -Raw)".Trim() } else {
 if ($vorher -and $vorher -ne $Beschleunigung) {
     Write-Host "Vorher installiert: $vorher, jetzt: $Beschleunigung. Tausche PyTorch aus."
     & $uv pip uninstall --python $Py torch torchvision torch-directml onnxruntime-directml
+    Remove-Item $torchAlt -ErrorAction SilentlyContinue
 }
 switch ($Beschleunigung) {
     "nvidia" {
         Write-Host "NVIDIA: installiere PyTorch mit CUDA (grosser Download, ca. 2,5 GB)."
-        & $uv pip install --python $Py torch torchvision --index-url https://download.pytorch.org/whl/cu126
+        if (Test-Path $torchAlt) {   # aeltere Karte: neuere PyTorch-Versionen rechnen darauf nicht
+            & $uv pip install --python $Py "torch==2.5.1" "torchvision==0.20.1" --index-url https://download.pytorch.org/whl/cu121
+        } else {
+            & $uv pip install --python $Py torch torchvision --index-url https://download.pytorch.org/whl/cu126
+        }
     }
     "directml" {
         Write-Host "AMD/Intel: installiere PyTorch mit DirectML (nutzt bei Laptops auch den gemeinsamen Grafikspeicher)."
@@ -166,6 +196,30 @@ switch ($Beschleunigung) {
     }
 }
 Pruefe "PyTorch-Installation"
+if ($Beschleunigung -eq "nvidia") {
+    # Rechnet CUDA wirklich? Aeltere Karten (Maxwell/Pascal, z. B. GeForce 940MX) unterstuetzen nicht jede
+    # PyTorch-Version. Dann PyTorch 2.5.1 nehmen, das sie sicher kann (und das beim naechsten Update behalten).
+    $probe = Join-Path $Umg "cuda-probe.py"
+    Set-Content -Path $probe -Encoding ASCII -Value @(
+        "import torch",
+        "try:",
+        "    ok = torch.cuda.is_available() and float((torch.ones(4, device='cuda') * 2).sum().item()) == 8.0",
+        "except Exception:",
+        "    ok = False",
+        "print(int(bool(ok)))")
+    $cudaOk = & $Py $probe
+    if ("$cudaOk".Trim() -ne "1" -and -not (Test-Path $torchAlt)) {
+        Write-Host "CUDA rechnet mit dieser PyTorch-Version nicht auf der Karte, nehme PyTorch 2.5.1 (CUDA 12.1)." -ForegroundColor Yellow
+        & $uv pip install --python $Py "torch==2.5.1" "torchvision==0.20.1" --index-url https://download.pytorch.org/whl/cu121
+        Pruefe "PyTorch-Installation (aeltere Version)"
+        Set-Content -Path $torchAlt -Value "2.5.1" -Encoding ASCII
+        $cudaOk = & $Py $probe
+    }
+    if ("$cudaOk".Trim() -ne "1") {
+        Write-Host "Die NVIDIA-Karte ist fuer PyTorch nicht nutzbar (meist zu alter Treiber: von nvidia.com aktualisieren). Das Programm rechnet dann auf dem Prozessor." -ForegroundColor Yellow
+    }
+    Remove-Item $probe -ErrorAction SilentlyContinue
+}
 Set-Content -Path $merker -Value $Beschleunigung -Encoding ASCII
 # Die installierte torch-Version festhalten, damit spaetere Pakete sie nicht austauschen
 $tvText = & $Py -c "import torch, torchvision; print(torch.__version__.split('+')[0], torchvision.__version__.split('+')[0])"
@@ -174,7 +228,9 @@ if ($LASTEXITCODE -ne 0 -or -not $tvText) {
 }
 $tv = ([string]$tvText).Trim().Split(" ")
 $zeilen = @("torch==$($tv[0])", "torchvision==$($tv[1])")
-if ($Beschleunigung -eq "directml") { $zeilen += @("open_clip_torch<4", "transformers<4.50") }
+if ($Beschleunigung -eq "directml" -or ($Beschleunigung -eq "nvidia" -and (Test-Path $torchAlt))) {
+    $zeilen += @("open_clip_torch<4", "transformers<4.50")   # passen zu den aelteren torch-Versionen
+}
 Set-Content -Path $constraints -Value $zeilen -Encoding ASCII
 
 Schritt "4/6  Programmpakete installieren"
