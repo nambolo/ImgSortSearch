@@ -142,7 +142,7 @@ def _gps_schluessel(lat, lon) -> str:
     return f"{lat:.4f},{lon:.4f}"
 
 
-def orte_zuordnen(db: Datenbank, stop: threading.Event | None = None) -> int:
+def orte_zuordnen(db: Datenbank, stop: threading.Event | None = None, fortschritt=None) -> int:
     """Ortsnamen für alle Bilder mit (neuen oder geänderten) GPS-Daten eintragen. Liefert die Anzahl."""
     offen = db.abfrage("SELECT id, gps_lat, gps_lon, ort_fuer FROM bilder WHERE "
                        "(gps_lat IS NOT NULL AND gps_lon IS NOT NULL) OR ort_fuer IS NOT NULL")
@@ -170,6 +170,8 @@ def orte_zuordnen(db: Datenbank, stop: threading.Event | None = None) -> int:
             v.executemany("UPDATE bilder SET ort=?, ort_name=?, ort_stadt=?, ort_land=?, ort_such=?, ort_fuer=? "
                           "WHERE id=?", updates)
         geaendert += [u[-1] for u in updates]
+        if fortschritt is not None:
+            fortschritt(len(geaendert), len(offen))
     db.suchtext_aktualisieren_viele(geaendert)
     ortsliste_freigeben()  # rund 40 MB, wird erst beim nächsten Indexlauf wieder gebraucht
     return len(geaendert)

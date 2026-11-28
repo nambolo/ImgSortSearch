@@ -87,7 +87,7 @@ async function status() {
       : (fortsetzen ? "Fortsetzen" : (s.gesamt ? "Index aktualisieren" : "Index erstellen"));
     knopf.disabled = i.laeuft && S.wirdAngehalten;
     knopf.classList.toggle("primaer", !i.laeuft);
-    $("#index-phase").textContent = { suchen: "Suche Dateien", metadaten: "Metadaten", analyse: "Analyse", beschreibung_lang: "Beschreibungen", einordnen: "Einordnen", fertig: "Index", angehalten: "Angehalten", fehler: "Fehler", bereit: "Index" }[i.phase] || "Index";
+    $("#index-phase").textContent = { suchen: "Suche Dateien", metadaten: "Metadaten", orte: "Ortsnamen", analyse: "Analyse", beschreibung_lang: "Beschreibungen", einordnen: "Einordnen", fertig: "Index", angehalten: "Angehalten", fehler: "Fehler", bereit: "Index" }[i.phase] || "Index";
     $("#index-zahl").textContent = i.laeuft && i.gesamt ? `${i.fertig.toLocaleString("de")} / ${i.gesamt.toLocaleString("de")}` : `${s.gesamt.toLocaleString("de")} Bilder`;
     $("#index-balken").style.width = i.gesamt ? `${(100 * i.fertig) / i.gesamt}%` : (i.laeuft ? "5%" : "0");
     const meldung = i.phase === "angehalten" && s.offen ? `Angehalten. ${s.offen.toLocaleString("de")} Bilder noch nicht analysiert.`
