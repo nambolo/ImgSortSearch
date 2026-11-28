@@ -306,7 +306,7 @@ def _beschreiber(monkeypatch, fehler_bei):
     import transformers
     modell = _FakeModell(fehler_bei)
     monkeypatch.setattr(modelle, "ausfuehrlich_vorhanden", lambda m: True)
-    monkeypatch.setattr(modelle, "waehle_geraet", lambda w: ("gpu", "Testkarte"))
+    monkeypatch.setattr(modelle, "waehle_geraet", lambda w, **k: ("gpu", "Testkarte"))
     monkeypatch.setattr(transformers.AutoModelForCausalLM, "from_pretrained", lambda *a, **k: modell)
     monkeypatch.setattr(transformers.AutoProcessor, "from_pretrained", lambda *a, **k: _FakeProc())
     return modelle.AusfuehrlicherBeschreiber(MODELL, "detailliert", "", "auto"), modell

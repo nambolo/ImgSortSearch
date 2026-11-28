@@ -97,8 +97,16 @@ try {
     } else {
         # install.ps1 ist wiederholbar: Vorhandenes bleibt, nur Neues/Geaendertes wird geladen
         $merker = Join-Path $Umg "beschleunigung.txt"
+        $wunsch = Join-Path $Umg "beschleunigung-wunsch.txt"
         $args2 = @("-OhneModelle")
-        if (Test-Path $merker) { $args2 += @("-Beschleunigung", (Text (Get-Content $merker -Raw))) }
+        if (Test-Path $wunsch) { $args2 += @("-Beschleunigung", (Text (Get-Content $wunsch -Raw))) }
+        elseif (Test-Path $merker) {
+            $b = Text (Get-Content $merker -Raw)
+            # aeltere Installation: "nvidia" kam fast immer aus der automatischen Erkennung. Neu erkennen,
+            # damit Laptops mit kleiner NVIDIA-Karte und Prozessorgrafik auf DirectML wechseln.
+            if ($b -eq "nvidia") { $b = "auto" }
+            $args2 += @("-Beschleunigung", $b)
+        }
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "install.ps1") @args2
         if ($LASTEXITCODE -ne 0) { throw "Pakete konnten nicht aktualisiert werden" }
     }

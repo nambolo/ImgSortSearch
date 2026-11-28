@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from . import metadata, modelle, personen
+from .drossel import Drossel
 from .datenbank import Datenbank, normalisiere, saetze_zu_blob, vektor_zu_blob
 from .einstellungen import Einstellungen, daten_ordner
 from .klassifizierung import Themen, einordnen, thema_prompt, zusatz_kategorien
@@ -162,9 +163,15 @@ class Modelle:
         self.fehler: dict[str, str] = {}
         self._geladen_mit: dict[str, tuple] = {}  # Einstellungen, mit denen ein Modell geladen wurde
 
+    def _threads(self) -> int:
+        """Thread-Zahl der Rechenbibliotheken nach der Einstellung "Rechner schonen" (setzt sie auch)."""
+        modelle.rechen_threads_setzen(Drossel(self.e).rechen_threads())
+        return modelle.rechen_threads()
+
     def _laden(self, name, schluessel: tuple, fabrik):
         """Lädt bei Bedarf. Wurden die Einstellungen des Modells (Modellname, Grafikkarte, Sprache ...)
         seit dem Laden geändert, wird es neu geladen, statt still mit dem alten weiterzuarbeiten."""
+        self._threads()
         with self._lock:
             attr = f"_{name}"
             alt = self._geladen_mit.get(name)
@@ -188,11 +195,12 @@ class Modelle:
 
     def gesichter(self):
         g, beschl = self.e["gesichter"]["min_groesse"], self.e.get("beschleunigung", "auto")
-        return self._laden("gesichter", (g, beschl), lambda: modelle.GesichtsModell(g, beschleunigung=beschl))
+        # onnxruntime legt die Thread-Zahl beim Laden fest: nach Änderung der Drosselung neu laden
+        return self._laden("gesichter", (g, beschl, self._threads()), lambda: modelle.GesichtsModell(g, beschleunigung=beschl))
 
     def ocr(self):
         o = self.e["ocr"]
-        return self._laden("ocr", (o["backend"], o["sprache"]), lambda: modelle.OCR(o["backend"], o["sprache"]))
+        return self._laden("ocr", (o["backend"], o["sprache"], self._threads()), lambda: modelle.OCR(o["backend"], o["sprache"]))
 
     def beschreiber(self):
         b, beschl = self.e["beschreibung"], self.e.get("beschleunigung", "auto")
@@ -296,6 +304,7 @@ def alle_neu_einordnen(db: Datenbank, e: Einstellungen, modelle_: Modelle) -> in
 class Indexer:
     def __init__(self, db: Datenbank, e: Einstellungen, modelle_: Modelle):
         self.db, self.e, self.m = db, e, modelle_
+        self.drossel = Drossel(e)
         self.status = {"laeuft": False, "phase": "bereit", "fertig": 0, "gesamt": 0,
                        "meldung": "", "fehler": [], "start": None, "aktuell": None, "aktuell_pfad": ""}
         self._stop = threading.Event()
@@ -326,6 +335,10 @@ class Indexer:
         self.status.update(kw)
 
     def _lauf(self, schritte):
+        with self.drossel.hintergrund():  # Rechner schonen: niedrige Priorität, weniger Threads
+            self._lauf_innen(schritte)
+
+    def _lauf_innen(self, schritte):
         self._setze(laeuft=True, fehler=[], start=time.time(), meldung="", zeiten="")
         self.m.fehler_vergessen()  # Modelle, die beim letzten Mal fehlten, erneut versuchen
         try:
@@ -434,6 +447,8 @@ class Indexer:
         ein Abbruch verliert höchstens die gerade laufenden Stapel, der nächste Lauf macht dort weiter."""
         from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
         exiftool = metadata.exiftool_verfuegbar()
+        drossel, stop = self.drossel, self._stop
+        threads = drossel.threads(METADATEN_THREADS)
         leser_alle: list[metadata.ExiftoolLeser] = []
         lokal = threading.local()
         zeiten = threading.Lock()
@@ -443,20 +458,21 @@ class Indexer:
             if exiftool:
                 leser = getattr(lokal, "leser", None)
                 if leser is None:
-                    leser = lokal.leser = metadata.ExiftoolLeser()
+                    leser = lokal.leser = metadata.ExiftoolLeser(creationflags=drossel.creationflags())
                     with zeiten:
                         leser_alle.append(leser)
-            return metadata.lies_metadaten(teil, exiftool=exiftool, leser=leser)
+            with drossel.arbeit(stop):
+                return metadata.lies_metadaten(teil, exiftool=exiftool, leser=leser)
 
         stapel = [pfade[i:i + METADATEN_STAPEL] for i in range(0, len(pfade), METADATEN_STAPEL)]
         fertig, t0 = 0, time.time()
-        pool = ThreadPoolExecutor(max_workers=METADATEN_THREADS, thread_name_prefix="metadaten")
+        pool = ThreadPoolExecutor(max_workers=threads, thread_name_prefix="metadaten")
         laufend = set()
         naechster = 0
         try:
             while naechster < len(stapel) or laufend:
                 # nur wenige Stapel im Voraus, damit ein Anhalten schnell greift und der Speicher klein bleibt
-                while naechster < len(stapel) and len(laufend) < 2 * METADATEN_THREADS and not self._stop.is_set():
+                while naechster < len(stapel) and len(laufend) < 2 * threads and not self._stop.is_set():
                     laufend.add(pool.submit(lesen, stapel[naechster]))
                     naechster += 1
                 if not laufend:
@@ -575,7 +591,8 @@ class Indexer:
         #   während die Grafikkarte schon die Bildvektoren des nächsten Stapels rechnet.
         # Die Bibliotheken (Pillow, OpenCV, onnxruntime, PyTorch) geben dabei den Python-Lock frei.
         from concurrent.futures import ThreadPoolExecutor
-        lader = ThreadPoolExecutor(max_workers=LADE_THREADS, thread_name_prefix="bild-laden")
+        drossel = self.drossel
+        lader = ThreadPoolExecutor(max_workers=drossel.threads(LADE_THREADS), thread_name_prefix="bild-laden")
         nach = ThreadPoolExecutor(max_workers=2, thread_name_prefix="gesichter-ocr")  # Gesichter | Text
         tensoren: dict = {}      # schon in den Lade-Threads vorbereitete Eingaben fürs Bildmodell
         vorrat: list = []        # Futures der vorgeladenen Stapel (je Stapel eine Liste)
@@ -620,7 +637,7 @@ class Indexer:
                 brauchen_clip = [(z, img) for z, img in geladen if not z["schritt_clip"]]
                 vek_map = {}
                 if brauchen_clip:
-                    with zeiten.messen("clip", len(brauchen_clip)):
+                    with drossel.arbeit(self._stop), zeiten.messen("clip", len(brauchen_clip)):
                         vek = clip.bilder([tensoren.pop(z["id"], img) for z, img in brauchen_clip])
                     pt = modelle.softmax(vek @ text_vek.T)[:, :n_text].sum(axis=1)
                     with self.db.verbindung() as v:
@@ -635,7 +652,7 @@ class Indexer:
                     brauchen = [(z, img) for z, img in geladen if not z["schritt_beschreibung"]]
                     if brauchen:
                         try:
-                            with zeiten.messen("beschreibung", len(brauchen)):
+                            with drossel.arbeit(self._stop), zeiten.messen("beschreibung", len(brauchen)):
                                 texte = beschreiber.beschreiben([img for _, img in brauchen])
                             with self.db.verbindung() as v:
                                 for (z, _), (de, en) in zip(brauchen, texte):
@@ -675,12 +692,13 @@ class Indexer:
         if self._stop.is_set():
             return None
         try:
-            with zeiten.messen("laden"):
-                img = modelle.bild_laden(Path(z["pfad"]), max_kante=2000)
-                vorschau_erzeugen(z["id"], img)
-            if tensoren is not None and not z["schritt_clip"] and hasattr(clip, "vorbereiten"):
-                with zeiten.messen("clip_vorbereiten"):
-                    tensoren[z["id"]] = clip.vorbereiten(img)
+            with self.drossel.arbeit(self._stop):
+                with zeiten.messen("laden"):
+                    img = modelle.bild_laden(Path(z["pfad"]), max_kante=2000)
+                    vorschau_erzeugen(z["id"], img)
+                if tensoren is not None and not z["schritt_clip"] and hasattr(clip, "vorbereiten"):
+                    with zeiten.messen("clip_vorbereiten"):
+                        tensoren[z["id"]] = clip.vorbereiten(img)
             return z, img
         except Exception as ex:
             with self.db.verbindung() as v:
@@ -695,7 +713,7 @@ class Indexer:
             if z["schritt_gesichter"]:
                 continue
             try:
-                with zeiten.messen("gesichter"):
+                with self.drossel.arbeit(self._stop), zeiten.messen("gesichter"):
                     gef = gesichter.finde(img)
                 bw, bh = img.size  # Boxen relativ (0..1) speichern
                 self._gesichter_speichern(z["id"], gef, bw, bh, getattr(gesichter, "kennung", modelle.GESICHT_KENNUNG))
@@ -720,7 +738,7 @@ class Indexer:
                      or pfad.suffix.lower() in TEXT_ENDUNGEN or "screenshot" in pfad.name.lower())
             if lohnt:
                 try:
-                    with zeiten.messen("ocr"):
+                    with self.drossel.arbeit(self._stop), zeiten.messen("ocr"):
                         text = ocr.lesen(img)
                 except Exception as ex:
                     self._fehler(f"Texterkennung {pfad.name}: {ex}")
@@ -753,7 +771,8 @@ class Indexer:
                 saetze = modelle.saetze_trennen(z["beschreibung_lang"])[:12]
                 if saetze:
                     try:
-                        updates.append((saetze_zu_blob(clip.texte(saetze)), z["id"]))
+                        with self.drossel.arbeit(self._stop):
+                            updates.append((saetze_zu_blob(clip.texte(saetze)), z["id"]))
                     except Exception as ex:  # ein Fehler hier soll den Indexlauf nicht abbrechen
                         self._fehler(f"Satzvektoren: {ex}")
                         return n
@@ -802,7 +821,8 @@ class Indexer:
                 if not geladen:
                     continue
                 try:
-                    texte = besch.beschreiben([img for _, img in geladen])
+                    with self.drossel.arbeit(self._stop):
+                        texte = besch.beschreiben([img for _, img in geladen])
                 except Exception as ex:
                     self._fehler(f"Ausführliche Beschreibung: {ex}")
                     fehlversuche += 1

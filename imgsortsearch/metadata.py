@@ -161,16 +161,17 @@ class ExiftoolLeser:
     ZEITLIMIT = 60.0     # Sekunden ohne jede Meldung von exiftool, bis eine Datei als hängend gilt
     MAX_HAENGER = 20     # je Stapel; danach den Rest ohne exiftool lesen
 
-    def __init__(self, exe: str | None = None):
+    def __init__(self, exe: str | None = None, creationflags: int = 0):
         self.exe = exe or shutil.which("exiftool") or "exiftool"
         self.proc = None
+        self.creationflags = creationflags  # z. B. niedrige Priorität (Rechner schonen)
 
     def _starten(self) -> None:
         import queue
         import threading
         self.proc = subprocess.Popen([self.exe, "-stay_open", "True", "-@", "-"], stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) | self.creationflags)
         self.zeilen = queue.Queue()
         proc, zeilen = self.proc, self.zeilen
 

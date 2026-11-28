@@ -491,6 +491,16 @@ async function langSpeichern() {
     status();
   } catch (e) { toast(e.message, true); }
 }
+// Rechner schonen: gleich speichern, damit es auch im laufenden Indexlauf sofort greift
+async function drosselSpeichern() {
+  $("#e-drossel-box").hidden = !$("#e-drossel").checked;
+  try {
+    S.einst = await api("/api/einstellungen", { json: { drosselung: {
+      aktiv: $("#e-drossel").checked, stufe: $("#e-drossel-stufe").value } } });
+  } catch (e) { toast(e.message, true); }
+}
+$("#e-drossel").onchange = drosselSpeichern;
+$("#e-drossel-stufe").onchange = drosselSpeichern;
 // Gleich speichern: das Modell soll erst geladen werden, wenn man es hier auswählt
 $("#e-lang").onchange = langSpeichern;
 $("#e-lang-modell").onchange = langSpeichern;
@@ -1331,9 +1341,9 @@ function einstStand() {
   $("#e-speichern").textContent = einstGeaendert ? "● Speichern" : "Speichern";
   $("#e-speichern").title = einstGeaendert ? "Es gibt ungespeicherte Änderungen" : "";
 }
-// Bilder-Ordner und ausführliche Beschreibungen werden sofort gespeichert, alles andere mit „Speichern“
+// Bilder-Ordner, ausführliche Beschreibungen und „Rechner schonen“ werden sofort gespeichert, alles andere mit „Speichern“
 ["input", "change"].forEach((art) => $("#ansicht-einstellungen").addEventListener(art, (ev) => {
-  if (ev.target.closest(".quellen, #e-quelle-neu, #e-lang, #e-lang-box, #e-modelle")) return;
+  if (ev.target.closest(".quellen, #e-quelle-neu, #e-lang, #e-lang-box, #e-modelle, #e-drossel, #e-drossel-box")) return;
   einstGeaendert = true;
   einstStand();
 }));
@@ -1361,6 +1371,10 @@ function ladeEinstellungen() {
   $("#e-gesichter").checked = e.gesichter.aktiv;
   $("#e-ocr").value = e.ocr.modus;
   $("#e-beschl").value = e.beschleunigung || "auto";
+  const dr = e.drosselung || { aktiv: true, stufe: "leicht" };
+  $("#e-drossel").checked = dr.aktiv !== false;
+  $("#e-drossel-stufe").value = dr.stufe || "leicht";
+  $("#e-drossel-box").hidden = dr.aktiv === false;
   $("#e-schwelle").value = e.schwelle;
   $("#e-schwelle-wert").textContent = e.schwelle;
   $("#e-karte-detail").checked = !!(e.karte && e.karte.detail);
@@ -1506,6 +1520,7 @@ $("#e-speichern").onclick = async () => {
     gesichter: { aktiv: $("#e-gesichter").checked },
     ocr: { modus: $("#e-ocr").value },
     beschleunigung: $("#e-beschl").value,
+    drosselung: { aktiv: $("#e-drossel").checked, stufe: $("#e-drossel-stufe").value },
     schwelle: +$("#e-schwelle").value,
     karte: { detail: $("#e-karte-detail").checked, online: $("#e-karte-online").checked },
   };

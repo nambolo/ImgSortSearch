@@ -164,15 +164,76 @@ def bild_laden(pfad: Path, max_kante: int | None = None) -> Image.Image:
 
 # ------------------------------------------------------------------ Grafikkarte
 
-def waehle_geraet(wunsch: str = "auto"):
+_RECHEN_THREADS: int | None = None
+
+
+def rechen_threads_setzen(n: int | None) -> None:
+    """Threads für PyTorch/onnxruntime auf dem Prozessor (Rechner schonen, siehe drossel.py)."""
+    global _RECHEN_THREADS
+    _RECHEN_THREADS = max(1, int(n)) if n else None
+
+
+def rechen_threads() -> int:
+    return _RECHEN_THREADS or max(1, (os.cpu_count() or 2) - 1)
+
+
+# Grafikspeicher, den ein Modell braucht: Gewichte plus Zwischenergebnisse, Treiber und Reserve
+SPEICHER_FAKTOR = 1.25
+SPEICHER_RESERVE_MB = 500
+_KARTEN_SPEICHER: dict[str, int] = {}   # str(Gerät) -> eigener Grafikspeicher in MB (nur dedizierte Karten)
+
+
+def speicher_bedarf_mb(gewichte_mb: float) -> int:
+    return int(gewichte_mb * SPEICHER_FAKTOR + SPEICHER_RESERVE_MB) if gewichte_mb else 0
+
+
+def modul_mb(*module) -> float:
+    """Größe der Gewichte eines oder mehrerer PyTorch-Modelle in MB."""
+    n = 0
+    for m in module:
+        if m is None:
+            continue
+        for t in list(m.parameters()) + list(m.buffers()):
+            n += t.numel() * t.element_size()
+    return n / 2 ** 20
+
+
+def geraet_speicher_mb(geraet) -> int | None:
+    """Eigener Grafikspeicher der gewählten Karte (None: unbekannt oder gemeinsamer Arbeitsspeicher)."""
+    return _KARTEN_SPEICHER.get(str(geraet))
+
+
+def waehle_geraet(wunsch: str = "auto", bedarf_mb: int = 0):
     """Liefert (torch-Gerät, Beschreibung).
 
     auto: NVIDIA (CUDA) > Intel (XPU) > DirectML (AMD/Intel/alle DirectX-12-Grafikkarten unter Windows) > CPU.
-    DirectML nutzt bei Intel-Grafik im Laptop automatisch den gemeinsamen Arbeitsspeicher."""
+    DirectML nutzt bei Intel-Grafik im Laptop automatisch den gemeinsamen Arbeitsspeicher.
+
+    ``bedarf_mb``: so viel Grafikspeicher braucht das Modell (siehe ``speicher_bedarf_mb``). Bei "auto" wird eine
+    Karte mit zu wenig eigenem Speicher (z. B. GeForce 940MX mit 2 GB) übergangen, wenn es eine Alternative gibt:
+    die Prozessorgrafik, die sich den Arbeitsspeicher teilt, oder zuletzt der Prozessor."""
     import torch
     wunsch = (wunsch or "auto").lower()
     if wunsch in ("auto", "cuda") and torch.cuda.is_available():
-        return "cuda", f"NVIDIA CUDA ({torch.cuda.get_device_name(0)})"
+        name = torch.cuda.get_device_name(0)
+        grund = _cuda_pruefen(torch)
+        if not grund and wunsch == "auto" and bedarf_mb:
+            try:
+                frei, _gesamt = torch.cuda.mem_get_info(0)
+                frei_mb = int(frei / 2 ** 20)
+                if frei_mb < bedarf_mb:
+                    grund = f"zu wenig freier Grafikspeicher ({frei_mb} MB frei, Modell braucht etwa {bedarf_mb} MB)"
+            except Exception:
+                pass
+        if not grund:
+            try:
+                _KARTEN_SPEICHER["cuda"] = int(torch.cuda.get_device_properties(0).total_memory / 2 ** 20)
+            except Exception:
+                pass
+            return "cuda", f"NVIDIA CUDA ({name})"
+        log.warning("NVIDIA-Karte %s wird nicht genutzt: %s", name, grund)
+        if wunsch == "cuda":
+            return "cpu", f"CPU (NVIDIA: {grund})"
     if wunsch in ("auto", "xpu") and hasattr(torch, "xpu") and torch.xpu.is_available():
         return "xpu", f"Intel XPU ({torch.xpu.get_device_name(0)})"
     if wunsch in ("auto", "directml"):
@@ -180,31 +241,120 @@ def waehle_geraet(wunsch: str = "auto"):
             import torch_directml
             if torch_directml.is_available():
                 namen = [torch_directml.device_name(i) for i in range(torch_directml.device_count())]
-                i = dml_karte_waehlen(namen)
-                return torch_directml.device(i), f"DirectML ({namen[i]})"
+                speicher = grafikspeicher_mb() if wunsch == "auto" and bedarf_mb else {}
+                i = dml_karte_waehlen(namen, bedarf_mb, speicher)
+                geraet = torch_directml.device(i)
+                mb = _speicher_zu(namen[i], speicher or grafikspeicher_mb())
+                if mb and _kartenart(namen[i]) == 2:
+                    _KARTEN_SPEICHER[str(geraet)] = mb
+                return geraet, f"DirectML ({namen[i]})"
         except Exception as e:  # Paket fehlt oder Treiber zu alt
             if wunsch == "directml":
                 log.warning("DirectML nicht verfügbar: %s", e)
     return "cpu", "CPU (Prozessor)"
 
 
-def dml_karte_waehlen(namen: list[str]) -> int:
+def _cuda_pruefen(torch) -> str:
+    """Leer, wenn CUDA wirklich rechnet. Ältere Karten (z. B. Maxwell wie die GeForce 940MX) unterstützt nicht
+    jede PyTorch-Version: dann meldet ``is_available`` trotzdem True, aber jede Rechnung scheitert."""
+    try:
+        if float((torch.ones(4, device="cuda") * 2).sum().item()) != 8.0:
+            return "rechnet falsch"
+        return ""
+    except Exception as e:
+        return f"diese PyTorch-Version unterstützt die Karte nicht ({str(e).splitlines()[0][:120]})"
+
+
+def _kartenart(name: str) -> int:
+    """0 = Software-Treiber, 1 = Prozessorgrafik (gemeinsamer Arbeitsspeicher), 2 = eigene Grafikkarte."""
+    import re
+    if re.search(r"Microsoft|Basic Render", name, re.I):
+        return 0
+    if re.search(r"NVIDIA|Radeon\s*(\(TM\)\s*)?(RX|Pro|VII)|\bArc\b|FirePro", name, re.I):
+        return 2
+    return 1
+
+
+def _speicher_zu(name: str, speicher: dict[str, int] | None) -> int | None:
+    if not speicher:
+        return None
+    if name in speicher:
+        return speicher[name]
+    n = name.lower().strip()
+    for k, v in speicher.items():
+        k = k.lower().strip()
+        if k and (k in n or n in k):
+            return v
+    return None
+
+
+def dml_karte_waehlen(namen: list[str], bedarf_mb: int = 0, speicher: dict[str, int] | None = None) -> int:
     """Index der DirectML-Grafikkarte, die am meisten taugt.
 
     Ist neben der eigentlichen Grafikkarte noch die Prozessorgrafik aktiv (Intel UHD, AMD Radeon Graphics),
     zählt Windows oft diese zuerst. Dedizierte Karten (Radeon RX/Pro, NVIDIA, Intel Arc) gehen vor,
-    der Software-Treiber "Microsoft Basic Render Driver" zuletzt."""
-    import re
+    der Software-Treiber "Microsoft Basic Render Driver" zuletzt.
 
-    def wert(name: str) -> int:
-        if re.search(r"Microsoft|Basic Render", name, re.I):
-            return 0
-        if re.search(r"NVIDIA|Radeon\s*(\(TM\)\s*)?(RX|Pro|VII)|\bArc\b|FirePro", name, re.I):
-            return 2
-        return 1
+    Passt das Modell nicht in den eigenen Speicher der Karte (``bedarf_mb`` gegen ``speicher``, Name -> MB),
+    geht die Prozessorgrafik vor: Sie nutzt den Arbeitsspeicher und läuft dann ohne Auslagern."""
     if not namen:
         return 0
+
+    def wert(name: str) -> float:
+        art = _kartenart(name)
+        if art == 2 and bedarf_mb:
+            mb = _speicher_zu(name, speicher)
+            if mb and mb < bedarf_mb:
+                return 0.5  # vor dem Software-Treiber, hinter der Prozessorgrafik
+        return art
     return max(range(len(namen)), key=lambda i: (wert(namen[i]), -i))
+
+
+_GRAFIKSPEICHER: dict[str, int] | None = None
+
+
+def grafikspeicher_mb() -> dict[str, int]:
+    """Eigener Speicher je Grafikkarte (Name -> MB) aus der Windows-Registry. Leer, wenn unbekannt.
+
+    Der Treiber trägt ihn als "HardwareInformation.qwMemorySize" ein (ältere: "...MemorySize")."""
+    global _GRAFIKSPEICHER
+    if _GRAFIKSPEICHER is not None:
+        return _GRAFIKSPEICHER
+    erg: dict[str, int] = {}
+    if sys.platform == "win32":
+        try:
+            import winreg
+            pfad = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, pfad) as klasse:
+                for i in range(64):
+                    try:
+                        unter = winreg.EnumKey(klasse, i)
+                    except OSError:
+                        break
+                    if not unter.isdigit():
+                        continue
+                    try:
+                        with winreg.OpenKey(klasse, unter) as k:
+                            name = str(winreg.QueryValueEx(k, "DriverDesc")[0])
+                            groesse = None
+                            for wertname in ("HardwareInformation.qwMemorySize", "HardwareInformation.MemorySize"):
+                                try:
+                                    groesse = winreg.QueryValueEx(k, wertname)[0]
+                                    break
+                                except OSError:
+                                    continue
+                            if isinstance(groesse, (bytes, bytearray)):
+                                groesse = int.from_bytes(bytes(groesse[:8]), "little")
+                            if groesse:
+                                erg[name] = int(groesse) // 2 ** 20
+                    except OSError:
+                        continue
+        except Exception as e:
+            log.info("Grafikspeicher nicht lesbar: %s", e)
+    if erg:
+        log.info("Grafikspeicher: %s", ", ".join(f"{k} {v} MB" for k, v in erg.items()))
+    _GRAFIKSPEICHER = erg
+    return erg
 
 
 class _GeraetMitRueckfall:
@@ -318,16 +468,30 @@ class ClipModell(_GeraetMitRueckfall):
         import torch
         self.torch = torch
         self._rechen_lock = threading.RLock()
-        torch.set_num_threads(max(1, (os.cpu_count() or 2) - 1))
-        self.geraet, self.geraet_name = waehle_geraet(beschleunigung)
+        torch.set_num_threads(rechen_threads())
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
             modell, pretrained=pretrained, cache_dir=str(modell_ordner() / "clip"))
         self.model.eval()
+        # Gerät nach dem Speicherbedarf des Bildteils wählen (nur der rechnet beim Indexlauf viel).
+        # Passt das ganze Modell nicht in den Grafikspeicher (z. B. 2 GB auf einer GeForce 940MX), bleibt der
+        # Textteil (Suchbegriffe, ein paar Wörter je Suche) auf dem Prozessor, statt alles auf den Prozessor zu legen.
+        bild_mb, gesamt_mb = modul_mb(self.model.visual), modul_mb(self.model)
+        self.geraet, self.geraet_name = waehle_geraet(beschleunigung, bedarf_mb=speicher_bedarf_mb(bild_mb))
+        self.text_geraet = self.geraet
+        karte_mb = geraet_speicher_mb(self.geraet)
+        if (beschleunigung or "auto").lower() == "auto" and karte_mb and karte_mb < speicher_bedarf_mb(gesamt_mb):
+            self.text_geraet = "cpu"
+            self.geraet_name += ", Textteil auf dem Prozessor"
+            log.info("Bildmodell: nur der Bildteil (%d MB) auf der Grafikkarte (%d MB), Textteil auf dem Prozessor",
+                     bild_mb, karte_mb)
         if "privateuseone" in str(self.geraet):  # DirectML
             n = einfache_attention_einsetzen(self.model.visual)
             log.info("DirectML: %d Attention-Schichten des Bildmodells ersetzt (sonst laufen sie auf dem Prozessor)", n)
         try:
-            self.model = self.model.to(self.geraet)
+            if str(self.text_geraet) == str(self.geraet):
+                self.model = self.model.to(self.geraet)
+            else:
+                self.model.visual = self.model.visual.to(self.geraet)
         except Exception as e:
             self._auf_cpu(e)
         self.tokenizer = open_clip.get_tokenizer(modell, cache_dir=str(modell_ordner() / "clip"))
@@ -351,6 +515,10 @@ class ClipModell(_GeraetMitRueckfall):
                 log.info("Bildmodell läuft vollständig auf der Grafikkarte (%s)", self.geraet_name)
         except Exception as e:
             log.info("Probelauf des Bildmodells nicht möglich: %s", e)
+
+    def _auf_cpu(self, fehler: Exception):
+        super()._auf_cpu(fehler)
+        self.text_geraet = "cpu"
 
     def bilder(self, bilder: list) -> np.ndarray:
         """Bildvektoren. Statt PIL-Bildern gehen auch schon vorbereitete Tensoren (siehe ``vorbereiten``)."""
@@ -379,7 +547,7 @@ class ClipModell(_GeraetMitRueckfall):
     def _texte(self, texte):
         torch = self.torch
         with torch.no_grad():
-            f = self.model.encode_text(self.tokenizer(texte).to(self.geraet)).float()
+            f = self.model.encode_text(self.tokenizer(texte).to(self.text_geraet)).float()
             f = f / f.norm(dim=-1, keepdim=True)
         return f.cpu().numpy()
 
@@ -582,7 +750,7 @@ class GesichtsModell:
         opt = ort.SessionOptions()
         opt.log_severity_level = 3
         if dml_optionen is None:
-            opt.intra_op_num_threads = max(1, (os.cpu_count() or 2) - 1)
+            opt.intra_op_num_threads = rechen_threads()
             anbieter = ["CPUExecutionProvider"]
         else:  # DirectML verlangt das so
             opt.enable_mem_pattern = False
@@ -778,7 +946,10 @@ class OCR:
     @staticmethod
     def _rapid_laden():
         from rapidocr_onnxruntime import RapidOCR
-        return RapidOCR()
+        try:  # Thread-Zahl begrenzen (Rechner schonen); sonst nimmt onnxruntime alle Kerne
+            return RapidOCR(intra_op_num_threads=rechen_threads())
+        except TypeError:  # ältere Version ohne diese Einstellung
+            return RapidOCR()
 
     @staticmethod
     def _windows_vorbereiten(sprache: str):
@@ -834,7 +1005,6 @@ class Beschreiber(_GeraetMitRueckfall):
         from transformers import BlipForConditionalGeneration, BlipProcessor
         self.torch = torch
         self._rechen_lock = threading.RLock()
-        self.geraet, self.geraet_name = waehle_geraet(beschleunigung)
         cache = str(modell_ordner() / "hf")
         self.proc = BlipProcessor.from_pretrained(modell, cache_dir=cache)
         self.model = BlipForConditionalGeneration.from_pretrained(modell, cache_dir=cache).eval()
@@ -843,6 +1013,10 @@ class Beschreiber(_GeraetMitRueckfall):
             from transformers import MarianMTModel, MarianTokenizer
             self.ue_tok = MarianTokenizer.from_pretrained(uebersetzer, cache_dir=cache)
             self.ue_model = MarianMTModel.from_pretrained(uebersetzer, cache_dir=cache).eval()
+        # Gerät erst jetzt wählen: passt das Modell nicht in den eigenen Speicher der Grafikkarte,
+        # nimmt die Auswahl die Prozessorgrafik (gemeinsamer Arbeitsspeicher) oder den Prozessor
+        bedarf = speicher_bedarf_mb(modul_mb(self.model, self.ue_model))
+        self.geraet, self.geraet_name = waehle_geraet(beschleunigung, bedarf_mb=bedarf)
         try:
             self.model = self.model.to(self.geraet)
             if self.ue_model is not None:
@@ -885,6 +1059,15 @@ _UNNOETIG = (".md", ".gitattributes", ".png", ".jpg", ".jpeg", ".gif", ".ipynb",
 def ausfuehrlich_ordner(modell: str) -> Path:
     """Modelldateien liegen im Datenordner des Programms (daten/modelle/ausfuehrlich/...)."""
     return modell_ordner() / "ausfuehrlich" / modell.replace("/", "--")
+
+
+def _dateien_mb(ordner: Path) -> float:
+    """Größe der Gewichte-Dateien eines Modellordners in MB."""
+    try:
+        return sum(p.stat().st_size for p in Path(ordner).rglob("*")
+                   if p.suffix in (".safetensors", ".bin", ".pt")) / 2 ** 20
+    except OSError:
+        return 0.0
 
 
 def ausfuehrlich_vorhanden(modell: str) -> bool:
@@ -1029,7 +1212,9 @@ class AusfuehrlicherBeschreiber(_GeraetMitRueckfall):
         self.aufgabe = STUFEN.get(stufe, STUFEN["sehr_detailliert"])
         self.max_tokens = _STUFE_TOKENS.get(stufe, 320)
         self.strahlen = max(1, int(strahlen))
-        self.geraet, self.geraet_name = waehle_geraet(beschleunigung)
+        # Speicherbedarf aus der Dateigröße (Florence-2 liegt in halber Genauigkeit vor, bei fp32 doppelt)
+        bedarf = speicher_bedarf_mb(_dateien_mb(ausfuehrlich_ordner(modell)) * (2 if genauigkeit == "fp32" else 1))
+        self.geraet, self.geraet_name = waehle_geraet(beschleunigung, bedarf_mb=bedarf)
         halb = genauigkeit == "fp16" or (genauigkeit == "auto" and str(self.geraet) != "cpu")
         self.dtype = torch.float16 if halb else torch.float32
         ordner = str(ausfuehrlich_ordner(modell))

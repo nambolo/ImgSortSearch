@@ -17,6 +17,7 @@ from PIL import Image
 
 from . import dubletten, modellpflege, modelle, orte, papierkorb, personen, sortieren, zwischenablage
 from .datenbank import Datenbank
+from .drossel import Drossel
 from .einstellungen import Einstellungen, daten_ordner
 from .indexer import Indexer, Modelle, alle_neu_einordnen, bilder_entfernen, bilder_im_ordner, lade_themen, \
     quarantaene_ordner, text_suche_bedingung, vorschau_erzeugen, vorschau_pfad
@@ -42,6 +43,7 @@ class Zustand:
         self.sortier_status = {"laeuft": False, "fertig": 0, "gesamt": 0, "ergebnis": None}
         self.dubletten_stop = threading.Event()
         self.dubletten = dubletten.Suche(self.db, vorschau_pfad, self.dubletten_stop)
+        self.dubletten.drossel = Drossel(self.e)
         self.dubletten_ergebnis = None
         self.kacheln = orte.Kacheln()
         self.indexer.nach_metadaten.append(lambda: self._orte_zuordnen(im_lauf=True))
@@ -157,6 +159,8 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
                     with z.db.verbindung() as v:
                         v.execute("UPDATE bilder SET kategorie_manuell=NULL WHERE kategorie_manuell=?", (k,))
                     z.db.zusatz_setzen(ids, k, True, zusatz)
+        if "drosselung" in neu:
+            z.indexer.drossel.anwenden()  # Priorität und Threads sofort, Pausen gelten ohnehin sofort
         if werte.get("beschleunigung") != alt_beschl and not z.indexer.status["laeuft"]:
             z.m.entladen()  # beim nächsten Gebrauch auf dem neuen Gerät laden
         a = werte["beschreibung"]["ausfuehrlich"]
@@ -936,7 +940,8 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
 
         def lauf():
             try:
-                erg = z.dubletten.ausfuehren()
+                with z.dubletten.drossel.hintergrund():
+                    erg = z.dubletten.ausfuehren()
                 if not erg["abgebrochen"] or z.dubletten_ergebnis is None:
                     z.dubletten_ergebnis = erg
             except Exception as ex:
