@@ -83,7 +83,7 @@ class Zustand:
 
     def _personen_zuordnen(self):
         self.indexer.status["meldung"] = "Gesichter werden Personen zugeordnet ..."
-        personen.neu_gruppieren(self.db, self.e.werte)
+        personen.neu_gruppieren(self.db, self.e.werte, nur_wenn_geaendert=True)
 
 
 def erstelle_app(z: Zustand | None = None) -> FastAPI:
@@ -356,14 +356,19 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
                 return {"gesamt": 0, "bilder": []}
             ids = list(rang)
             treffer = []
+            # erst nur die Spalten fürs Sortieren (bei sehr vielen Treffern, z. B. "iphone" in 100.000 Bildern,
+            # dauerte das Laden ganzer Zeilen mit Bildvektor Sekunden), danach die angezeigte Seite komplett
             for i in range(0, len(ids), 900):
                 teil = ids[i:i + 900]
-                treffer += z.db.abfrage(f"SELECT *, {KAT} AS kategorie FROM bilder WHERE {wo} AND id IN "
-                                        f"({','.join('?' * len(teil))})", (*par, *teil))
+                treffer += z.db.abfrage(f"SELECT id, datum, pfad, kategorie_manuell, sicherheit FROM bilder "
+                                        f"WHERE {wo} AND id IN ({','.join('?' * len(teil))})", (*par, *teil))
             # Standard: beste Treffer zuerst, bei gleichem Rang die neuesten. Eine andere gewählte
             # Sortierung gilt auch für die Treffer (früher wurde sie bei einer Suche still ignoriert).
             _sortieren(treffer, rang, sortierung)
-            return {"gesamt": len(treffer), "bilder": [kurz(r) for r in treffer[offset:offset + limit]]}
+            seite = [r["id"] for r in treffer[offset:offset + limit]]
+            voll = {r["id"]: r for r in z.db.abfrage(f"SELECT *, {KAT} AS kategorie FROM bilder WHERE id IN "
+                                                     f"({','.join('?' * len(seite))})", seite)} if seite else {}
+            return {"gesamt": len(treffer), "bilder": [kurz(voll[i]) for i in seite if i in voll]}
 
         # immer eindeutig (id als letzter Schlüssel), sonst kann "Weitere laden" Bilder doppelt bringen
         ordnung = {"datum_ab": "datum DESC, id DESC", "datum_auf": "datum IS NULL, datum ASC, id ASC",
@@ -425,16 +430,15 @@ def erstelle_app(z: Zustand | None = None) -> FastAPI:
         return {i: basis - 0.001 - (top - s) for i, s in sorted(bester.items(), key=lambda x: -x[1])[:300]}
 
     def _vektor_rang(v: np.ndarray, schwelle: float, max_n: int, nur=None) -> dict[int, float]:
-        ids, mat = z.db.clip_matrix()
-        if not len(ids) or mat.shape[1] != v.shape[0]:
+        # nur: nur unter diesen Bildern suchen
+        ids, sims = z.db.clip_aehnlichkeit(v / (np.linalg.norm(v) + 1e-9), ids_filter=nur)
+        if not len(ids):
             return {}
-        if nur is not None:  # nur unter diesen Bildern suchen
-            maske = np.isin(ids, np.fromiter(nur, dtype=np.int64))
-            ids, mat = ids[maske], mat[maske]
-            if not len(ids):
-                return {}
-        sims = mat @ (v / (np.linalg.norm(v) + 1e-9))
-        ordnung = np.argsort(-sims)[:max_n]
+        if len(sims) > max_n:  # nur die besten max_n sortieren, nicht alle 180.000
+            teil = np.argpartition(-sims, max_n - 1)[:max_n]
+            ordnung = teil[np.argsort(-sims[teil])]
+        else:
+            ordnung = np.argsort(-sims)
         return {int(ids[i]): float(sims[i]) for i in ordnung if sims[i] >= schwelle}
 
     @app.post("/api/suche-mit-bild")
