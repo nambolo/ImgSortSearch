@@ -112,6 +112,13 @@ def blob_zu_vektor(b: bytes) -> np.ndarray:
     return np.frombuffer(b, dtype=np.float16).astype(np.float32)
 
 
+def blobs_zu_matrix(blobs: list[bytes], dtype=np.float32) -> np.ndarray:
+    """Viele gleich lange Vektoren auf einmal umwandeln (viel schneller als einzeln bei 100.000+)."""
+    if not blobs:
+        return np.zeros((0, 0), dtype=dtype)
+    return np.frombuffer(b"".join(blobs), dtype=np.float16).reshape(len(blobs), -1).astype(dtype)
+
+
 class Datenbank:
     def __init__(self, datei: Path):
         self.datei = Path(datei)
@@ -216,6 +223,7 @@ class Datenbank:
             con = self._con()
             con.commit()
             con.execute("VACUUM")  # Platz auf der Festplatte wieder freigeben
+        self.clip_vergessen()
         return n
 
     SUCHTEXT_STAND = "2"  # erhöhen, wenn sich der Aufbau des Suchtexts ändert (2: ß-Varianten aus der Texterkennung)
@@ -276,14 +284,47 @@ class Datenbank:
 
     # ---------------------------------------------------------- Vektoren
 
-    def clip_matrix(self) -> tuple[np.ndarray, np.ndarray]:
-        """(ids, Matrix N x D) aller Bilder mit Bildvektor."""
-        zeilen = self.abfrage("SELECT id, clip FROM bilder WHERE clip IS NOT NULL")
-        if not zeilen:
-            return np.zeros(0, dtype=np.int64), np.zeros((0, 1), dtype=np.float32)
-        ids = np.array([z["id"] for z in zeilen], dtype=np.int64)
-        mat = np.stack([blob_zu_vektor(z["clip"]) for z in zeilen])
-        return ids, mat
+    def clip_vergessen(self) -> None:
+        """Bildvektoren haben sich geändert: die zwischengespeicherte Matrix beim nächsten Mal neu laden."""
+        self._clip_stand = getattr(self, "_clip_stand", 0) + 1
+
+    def clip_matrix(self, halb: bool = False) -> tuple[np.ndarray, np.ndarray]:
+        """(ids, Matrix N x D) aller Bilder mit Bildvektor.
+
+        Wird im Speicher gehalten (als float16, rund 180 MB bei 180.000 Bildern), bis sich Bildvektoren
+        ändern: früher wurde sie bei jeder Suche neu aus der Datenbank gelesen (über eine Sekunde).
+        ``halb``: float16 zurückgeben (nicht kopieren, für eigene blockweise Rechnungen)."""
+        stand = getattr(self, "_clip_stand", 0)
+        cache = getattr(self, "_clip_cache", None)
+        if cache is None or cache[0] != stand:
+            ids, blobs = [], []
+            for z in self._con().execute("SELECT id, clip FROM bilder WHERE clip IS NOT NULL"):
+                ids.append(z[0])
+                blobs.append(z[1])
+            laengen = {len(b) for b in blobs}
+            if len(laengen) > 1:  # gemischte Modelle (Wechsel läuft gerade): nur die häufigste Länge
+                haeufig = max(laengen, key=[len(b) for b in blobs].count)
+                ids, blobs = zip(*[(i, b) for i, b in zip(ids, blobs) if len(b) == haeufig]) if blobs else ([], [])
+            ids = np.array(ids, dtype=np.int64)
+            mat = blobs_zu_matrix(list(blobs), dtype=np.float16) if len(ids) else np.zeros((0, 1), dtype=np.float16)
+            mat.setflags(write=False)
+            cache = self._clip_cache = (stand, ids, mat)
+        _, ids, mat = cache
+        return ids, (mat if halb else mat.astype(np.float32))
+
+    def clip_aehnlichkeit(self, v: np.ndarray, ids_filter=None) -> tuple[np.ndarray, np.ndarray]:
+        """(ids, Kosinus-artige Ähnlichkeit mat @ v) für alle Bilder mit Bildvektor, blockweise gerechnet."""
+        ids, mat = self.clip_matrix(halb=True)
+        if not len(ids) or mat.shape[1] != v.shape[0]:
+            return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.float32)
+        if ids_filter is not None:
+            maske = np.isin(ids, np.fromiter(ids_filter, dtype=np.int64))
+            ids, mat = ids[maske], mat[maske]
+        v = np.asarray(v, dtype=np.float32)
+        sims = np.empty(len(ids), dtype=np.float32)
+        for a in range(0, len(ids), 20000):
+            sims[a:a + 20000] = mat[a:a + 20000].astype(np.float32) @ v
+        return ids, sims
 
     def beschreibung_matrix(self) -> tuple[np.ndarray, np.ndarray]:
         """(bild_ids, Matrix) der Satzvektoren der ausführlichen Beschreibungen, eine Zeile je Satz."""
@@ -331,7 +372,7 @@ class Datenbank:
             return (np.zeros(0, dtype=np.int64),) * 2 + (np.zeros((0, 0), dtype=np.float32),)
         return (np.array([z["id"] for z in zeilen], dtype=np.int64),
                 np.array([z["bild_id"] for z in zeilen], dtype=np.int64),
-                np.stack([blob_zu_vektor(z["vektor"]) for z in zeilen]))
+                blobs_zu_matrix([z["vektor"] for z in zeilen]))
 
 
 def saetze_zu_blob(mat: np.ndarray) -> bytes:

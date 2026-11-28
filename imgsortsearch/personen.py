@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .datenbank import Datenbank, blob_zu_vektor
+from .datenbank import Datenbank, blob_zu_vektor, blobs_zu_matrix as _blobs_zu_matrix
 from .modelle import GESICHT_KENNUNG
 
 # Kosinus-Ähnlichkeit für ArcFace (w600k_r50). Gemessen: gleiche Person meist 0,55–0,9,
@@ -91,21 +91,40 @@ def uebernahme_finden(alte: list[dict], neue_boxen: list[tuple]) -> list[dict | 
 
 # ------------------------------------------------------------------ Clustering
 
-def _nachbarn(mat: np.ndarray, schwelle: float, k: int = 30, block: int = 1024):
-    """Für jedes Gesicht die bis zu k ähnlichsten anderen über der Schwelle: Liste von (j, sim)."""
+def _nachbarn(mat: np.ndarray, schwelle: float, k: int = 30, block: int | None = None):
+    """Für jedes Gesicht die bis zu k ähnlichsten anderen über der Schwelle: Liste von (j, sim).
+
+    Rechnet blockweise (jeder Block gegen alle) und betrachtet nur Paare über der Schwelle. Früher wurde
+    für jede Zeile über alle Gesichter sortiert (argpartition): bei 100.000+ Gesichtern dauerte das
+    Minuten und brauchte mehrere GB Speicher."""
+    mat = np.ascontiguousarray(mat, dtype=np.float32)
     n = len(mat)
     erg: list[list[tuple[int, float]]] = [[] for _ in range(n)]
+    kk = min(k, n - 1)
+    if kk <= 0:
+        return erg
+    if block is None:  # ein Block belegt höchstens rund 200 MB
+        block = int(max(16, min(1024, 5e7 // max(n, 1))))
     for s in range(0, n, block):
         sims = mat[s:s + block] @ mat.T
-        for r in range(len(sims)):
-            sims[r, s + r] = -1
-        kk = min(k, n - 1)
-        if kk <= 0:
-            break
-        top = np.argpartition(-sims, kk - 1, axis=1)[:, :kk]
-        for r in range(len(sims)):
-            js = top[r][sims[r, top[r]] >= schwelle]
-            erg[s + r] = [(int(j), float(sims[r, j])) for j in js]
+        r = np.arange(len(sims))
+        sims[r, s + r] = -1
+        flach = np.flatnonzero(sims >= schwelle)  # deutlich schneller als np.nonzero auf 2D
+        if not len(flach):
+            continue
+        zeilen, spalten = np.divmod(flach, n)
+        werte = sims.ravel()[flach]
+        ordnung = np.lexsort((-werte, zeilen))  # je Zeile die ähnlichsten zuerst
+        zeilen, spalten, werte = zeilen[ordnung], spalten[ordnung], werte[ordnung]
+        anfang = np.searchsorted(zeilen, r)
+        rang = np.arange(len(zeilen)) - anfang[zeilen]
+        behalten = rang < kk
+        zeilen, spalten, werte = zeilen[behalten], spalten[behalten].tolist(), werte[behalten].tolist()
+        grenzen = np.searchsorted(zeilen, np.arange(len(sims) + 1)).tolist()
+        for i in range(len(sims)):
+            a, b = grenzen[i], grenzen[i + 1]
+            if a < b:
+                erg[s + i] = list(zip(spalten[a:b], werte[a:b]))
     return erg
 
 
@@ -219,7 +238,7 @@ def _lade(db: Datenbank):
         "person": np.array([z["person_id"] or 0 for z in zeilen], dtype=np.int64),
         "fest": np.array([bool(z["person_fest"]) for z in zeilen]),
         "q": np.array([z["q"] for z in zeilen], dtype=np.float32),
-        "mat": _norm(np.stack([blob_zu_vektor(z["vektor"]) for z in zeilen])),
+        "mat": _norm(_blobs_zu_matrix([z["vektor"] for z in zeilen])),
     }
 
 
@@ -253,9 +272,26 @@ def _kern(mat: np.ndarray, fest: np.ndarray, s: dict) -> tuple[np.ndarray, list[
                 for k, z in enumerate(zentren)]
 
 
-def neu_gruppieren(db: Datenbank, einstellungen: dict | None = None) -> dict:
-    """Ordnet alle Gesichter (des aktuellen Modells) Personen zu. Siehe Modulbeschreibung."""
+def _stand(db: Datenbank, s: dict) -> str:
+    """Kurzer Fingerabdruck von allem, was das Gruppieren beeinflusst: Gesichter, Zuordnungen,
+    Korrekturen des Nutzers und Schwellen. Gleich wie beim letzten Mal: Gruppieren ergäbe dasselbe."""
+    g = db.eins("SELECT COUNT(*) n, MAX(id) m, TOTAL(person_fest) f, TOTAL(ignoriert) i, "
+                "TOTAL(COALESCE(person_id, 0) * (id % 1009 + 1)) p FROM gesichter WHERE modell=?", (GESICHT_KENNUNG,))
+    pe = db.eins("SELECT COUNT(*) n, TOTAL(fest) f, COUNT(name) b, TOTAL(id) s FROM personen")
+    ab = db.eins("SELECT COUNT(*) n, TOTAL(gesicht_id + person_id * 7) s FROM gesicht_abgelehnt")
+    ve = db.eins("SELECT COUNT(*) n, TOTAL(a * 31 + b) s FROM personen_verschieden")
+    namen = db.eins("SELECT group_concat(name, '|') t FROM (SELECT name FROM personen WHERE name IS NOT NULL ORDER BY id)")
+    return repr((tuple(g), tuple(pe), tuple(ab), tuple(ve), namen["t"], sorted(s.items())))
+
+
+def neu_gruppieren(db: Datenbank, einstellungen: dict | None = None, nur_wenn_geaendert: bool = False) -> dict:
+    """Ordnet alle Gesichter (des aktuellen Modells) Personen zu. Siehe Modulbeschreibung.
+
+    ``nur_wenn_geaendert``: nichts tun, wenn seit dem letzten Gruppieren weder neue Gesichter noch
+    Korrekturen dazugekommen sind (nach jedem Indexlauf; bei 100.000+ Gesichtern spart das Minuten)."""
     s = schwellen(einstellungen)
+    if nur_wenn_geaendert and db.meta("personen_stand") == _stand(db, s):
+        return {"zugeordnet": None, "personen": None, "uebersprungen": True}
     d = _lade(db)
     if d is None:
         return {"zugeordnet": 0, "personen": 0}
@@ -380,6 +416,7 @@ def neu_gruppieren(db: Datenbank, einstellungen: dict | None = None) -> dict:
         v.execute("DELETE FROM personen WHERE name IS NULL AND id NOT IN "
                   "(SELECT DISTINCT person_id FROM gesichter WHERE person_id IS NOT NULL)")
     db.suchtext_aktualisieren_viele({int(d["bild"][i]) for i in geaendert})
+    db.meta_setzen("personen_stand", _stand(db, s))
     return {"zugeordnet": int((person > 0).sum()), "geaendert": int(len(geaendert)),
             "personen": int(len(set(person[person > 0].tolist())))}
 

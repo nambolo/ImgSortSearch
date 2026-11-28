@@ -127,6 +127,7 @@ def bilder_entfernen(db: Datenbank, ids: list[int]) -> int:
         # Personen ohne Gesichter bleiben sonst als leere Einträge zurück
         v.execute("DELETE FROM personen WHERE id NOT IN (SELECT DISTINCT person_id FROM gesichter "
                   "WHERE person_id IS NOT NULL)")
+    db.clip_vergessen()
     caches_entfernen(ids, gesicht_ids)
     return len(ids)
 
@@ -371,6 +372,7 @@ class Indexer:
             with self.db.verbindung() as v:
                 # auch die Satzvektoren der ausführlichen Beschreibungen stammen vom Bildmodell (Textteil)
                 v.execute("UPDATE bilder SET clip=NULL, schritt_clip=0, beschreibung_lang_vek=NULL")
+            self.db.clip_vergessen()
             self.db.meta_setzen("clip_kennung", kennung)
 
     # ---------------------------------------------------------- Schritt 1
@@ -504,6 +506,7 @@ class Indexer:
                                "Datei reagiert nicht beim Lesen" if info.haengt else None))
                 except Exception as ex:  # ein Bild mit seltsamen Metadaten bricht nicht den Lauf ab
                     self._fehler(f"Metadaten {info.pfad.name}: {ex}")
+        self.db.clip_vergessen()  # geänderte Dateien verlieren ihren Bildvektor
         # Suchtext (Dateiname, Ordner, Kamera) gleich anlegen: so findet die Suche neue Bilder schon
         # während der Analyse läuft, und auch Dateien, die sich nicht analysieren lassen
         pfade = [str(i.pfad) for i in infos]
@@ -625,6 +628,7 @@ class Indexer:
                             v.execute("UPDATE bilder SET clip=?, textlastig=?, schritt_clip=1 WHERE id=?",
                                       (vektor_zu_blob(x), float(t), z["id"]))
                             vek_map[z["id"]] = float(t)
+                    self.db.clip_vergessen()
 
                 # Beschreibungen im Stapel (Grafikkarte)
                 if beschreiber:

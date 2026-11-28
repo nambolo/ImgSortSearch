@@ -177,7 +177,7 @@ class Suche:
             return []
         self.status.update(phase="vergleich", meldung="Ähnliche Bilder werden gesucht ...", fertig=0, gesamt=len(ids))
         bits = _bits([cache[i]["dhash"] for i in ids])
-        nbits = 1.0 - bits
+        anzahl = bits.sum(axis=1)
         clip = [info[i]["clip"] for i in ids]
         dim = next((len(blob_zu_vektor(c)) for c in clip if c is not None), 0)
         vek = np.zeros((len(ids), max(dim, 1)), dtype=np.float32)
@@ -191,16 +191,21 @@ class Suche:
         seitenv = np.array([_seitenverhaeltnis(info[i]) for i in ids], dtype=np.float32)
         zeit = [_kamerazeit(info[i]) for i in ids]
         paare = []
-        block = 1000
+        # Ein Block (Zeilen x alle Bilder) soll höchstens rund 150 MB je Zwischenergebnis belegen:
+        # mit festen 1000 Zeilen waren es bei 180.000 Bildern über 2 GB
+        block = int(max(32, min(1000, 4e7 // len(ids))))
         for a in range(0, len(ids), block):
             if self._abbruch():
                 return []
-            b = slice(a, min(a + block, len(ids)))
-            abstand = bits[b] @ nbits.T + nbits[b] @ bits.T
-            kandidat = abstand <= GRENZE_MIT_CLIP
-            for zi, sj in zip(*np.nonzero(kandidat)):
-                i = a + int(zi)
-                j = int(sj)
+            e = min(a + block, len(ids))
+            # Hamming-Abstand = gesetzte Bits in a + in b - 2 * gemeinsame; nur gegen die späteren Bilder
+            # (j > i), jedes Paar also einmal. Halb so viele Multiplikationen wie vorher, ein Viertel der Paare.
+            abstand = anzahl[a:e, None] + anzahl[None, a:] - 2 * (bits[a:e] @ bits[a:].T)
+            breite = len(ids) - a
+            for k in np.flatnonzero(abstand <= GRENZE_MIT_CLIP).tolist():
+                zi, sj = divmod(k, breite)
+                i = a + zi
+                j = a + sj
                 if j <= i:
                     continue
                 d = abstand[zi, sj]
