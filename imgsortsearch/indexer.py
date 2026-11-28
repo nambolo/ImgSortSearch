@@ -28,6 +28,9 @@ VORSCHAU_KANTE = 360
 # Bilder öffnen parallel zur Grafikkarte: so viele Threads und so viele Stapel im Voraus
 LADE_THREADS = max(1, min(4, (os.cpu_count() or 2) // 2))
 VORLADEN_STAPEL = 2
+# Metadaten: mehrere exiftool gleichzeitig (jedes liest eine Datei nach der anderen), je Stapel so viele Dateien
+METADATEN_THREADS = max(2, min(4, (os.cpu_count() or 2) // 2))
+METADATEN_STAPEL = 200
 
 
 class Zeitmessung:
@@ -327,8 +330,10 @@ class Indexer:
         try:
             self._bildmodell_pruefen()
             self.dateien_einlesen()
-            for cb in self.nach_metadaten:
-                cb()
+            if not self._stop.is_set():
+                self._setze(phase="orte", fertig=0, gesamt=0, meldung="Ortsnamen zu den GPS-Daten ...")
+                for cb in self.nach_metadaten:
+                    cb()
             if not self._stop.is_set():
                 self.analysieren(schritte)
             # Während des Laufs zum Neu-Analysieren vorgemerkte Bilder gleich mitnehmen,
@@ -372,17 +377,24 @@ class Indexer:
 
     def dateien_einlesen(self):
         self._setze(phase="suchen", meldung="Suche Dateien ...", fertig=0, gesamt=0)
-        gefunden: list[Path] = []
+        gefunden: list[tuple[Path, int, float]] = []  # (Pfad, Größe, mtime)
         for q in self.e["quellen"]:
+            if self._stop.is_set():
+                return
             qp = Path(q)
             if qp.is_dir():
-                gefunden += metadata.finde_bilder(qp, videos=False)
+                schon = len(gefunden)
+                gefunden += metadata.finde_bilder_mit_stat(
+                    qp, videos=False,
+                    gefunden=lambda n: self._setze(meldung=f"Suche Dateien ... {schon + n:,} gefunden".replace(",", ".")))
+        if self._stop.is_set():
+            return
         bekannt = {z["pfad"]: (z["id"], z["groesse"], z["mtime"])
                    for z in self.db.abfrage("SELECT id, pfad, groesse, mtime FROM bilder")}
 
         # verschwundene Dateien austragen (nur unterhalb erreichbarer Quellen)
         erreichbar = [str(Path(q)) for q in self.e["quellen"] if Path(q).is_dir()]
-        vorhanden = {str(p) for p in gefunden}
+        vorhanden = {str(p) for p, _, _ in gefunden}
         weg = [i for pfad, (i, _, _) in bekannt.items() if pfad not in vorhanden and _unter(pfad, erreichbar)]
         if weg:
             bilder_entfernen(self.db, weg)
@@ -392,61 +404,111 @@ class Indexer:
         ziel = (self.e.get("sortieren") or {}).get("ziel")
         if ziel and _unter(str(Path(ziel)), erreichbar) and not any(
                 _unter(q, [str(Path(ziel))]) for q in erreichbar):  # Ziel liegt echt innerhalb einer Quelle
-            gefunden = [p for p in gefunden if str(p) in bekannt or not _unter(str(p), [str(Path(ziel))])]
+            gefunden = [t for t in gefunden if str(t[0]) in bekannt or not _unter(str(t[0]), [str(Path(ziel))])]
 
         # aussortierte Dubletten im Quarantäne-Ordner nicht wieder aufnehmen
         quarantaene = str(quarantaene_ordner(self.e))
-        gefunden = [p for p in gefunden if not _unter(str(p), [quarantaene])]
+        gefunden = [t for t in gefunden if not _unter(str(t[0]), [quarantaene])]
 
+        # Größe und Änderungszeit stammen schon aus der Dateisuche (kein zweiter Zugriff je Datei)
         neu_oder_geaendert = []
-        for p in gefunden:
-            try:
-                st = p.stat()
-            except OSError:
-                continue
+        for p, groesse, mtime in gefunden:
             alt = bekannt.get(str(p))
-            if not alt or alt[1] != st.st_size or abs((alt[2] or 0) - st.st_mtime) > 1:
+            if not alt or alt[1] != groesse or abs((alt[2] or 0) - mtime) > 1:
                 neu_oder_geaendert.append(p)
-        self._setze(phase="metadaten", gesamt=len(neu_oder_geaendert), fertig=0,
-                    meldung=f"{len(gefunden)} Dateien, {len(neu_oder_geaendert)} neu oder geändert. Lese Metadaten ...")
-        for i in range(0, len(neu_oder_geaendert), 400):
-            if self._stop.is_set():
-                return
-            teil = neu_oder_geaendert[i:i + 400]
-            infos = metadata.lies_metadaten(teil)
-            with self.db.verbindung() as v:
-                for info in infos:
-                    try:
-                        st = info.pfad.stat()
-                    except OSError:  # inzwischen gelöscht oder Laufwerk weg
-                        continue
-                    try:
-                        v.execute("""
-                            INSERT INTO bilder (pfad, groesse, mtime, datum, datum_quelle, hersteller, modell, kamera,
-                                                gps_lat, gps_lon, breite, hoehe, schlagwoerter)
-                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-                            ON CONFLICT(pfad) DO UPDATE SET groesse=excluded.groesse, mtime=excluded.mtime,
-                              datum=excluded.datum, datum_quelle=excluded.datum_quelle, hersteller=excluded.hersteller,
-                              modell=excluded.modell, kamera=excluded.kamera, gps_lat=excluded.gps_lat,
-                              gps_lon=excluded.gps_lon, breite=excluded.breite, hoehe=excluded.hoehe,
-                              schlagwoerter=excluded.schlagwoerter, clip=NULL, schritt_clip=0, schritt_ocr=0,
-                              schritt_gesichter=0, schritt_beschreibung=0, schritt_lang=0, fehler=NULL""",
-                                  (str(info.pfad), st.st_size, st.st_mtime,
-                                   info.datum.isoformat(sep=" ") if info.datum else None, info.datum_quelle,
-                                   info.hersteller, info.modell, info.kamera, info.gps_lat, info.gps_lon,
-                                   info.breite, info.hoehe, ", ".join(info.schlagwoerter)))
-                    except Exception as ex:  # ein Bild mit seltsamen Metadaten bricht nicht den Lauf ab
-                        self._fehler(f"Metadaten {info.pfad.name}: {ex}")
-            # Suchtext (Dateiname, Ordner, Kamera) gleich anlegen: so findet die Suche neue Bilder schon
-            # während der Analyse läuft, und auch Dateien, die sich nicht analysieren lassen
-            pfade = [str(p) for p in teil]
-            self.db.suchtext_aktualisieren_viele(r["id"] for r in self.db.abfrage(
-                f"SELECT id FROM bilder WHERE pfad IN ({','.join('?' * len(pfade))})", pfade))
-            self._setze(fertig=min(len(neu_oder_geaendert), i + 400))
+        del bekannt, vorhanden
+        gesamt = len(neu_oder_geaendert)
+        self._setze(phase="metadaten", gesamt=gesamt, fertig=0,
+                    meldung=f"{_zahl(len(gefunden))} Dateien, {_zahl(gesamt)} neu oder geändert. Lese Metadaten ...")
+        if gesamt:
+            self._metadaten_lesen(neu_oder_geaendert)
         # ältere Indexe: Bilder, die nie analysiert werden konnten, hatten keinen Suchtext
         if not self._stop.is_set():
             self.db.suchtext_aktualisieren_viele(
                 r["id"] for r in self.db.abfrage("SELECT id FROM bilder WHERE suchtext IS NULL OR suchtext=''"))
+
+    def _metadaten_lesen(self, pfade: list[Path]) -> None:
+        """Metadaten in Stapeln lesen, mehrere exiftool parallel. Jeder Stapel wird sofort gespeichert:
+        ein Abbruch verliert höchstens die gerade laufenden Stapel, der nächste Lauf macht dort weiter."""
+        from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+        exiftool = metadata.exiftool_verfuegbar()
+        leser_alle: list[metadata.ExiftoolLeser] = []
+        lokal = threading.local()
+        zeiten = threading.Lock()
+
+        def lesen(teil):
+            leser = None
+            if exiftool:
+                leser = getattr(lokal, "leser", None)
+                if leser is None:
+                    leser = lokal.leser = metadata.ExiftoolLeser()
+                    with zeiten:
+                        leser_alle.append(leser)
+            return metadata.lies_metadaten(teil, exiftool=exiftool, leser=leser)
+
+        stapel = [pfade[i:i + METADATEN_STAPEL] for i in range(0, len(pfade), METADATEN_STAPEL)]
+        fertig, t0 = 0, time.time()
+        pool = ThreadPoolExecutor(max_workers=METADATEN_THREADS, thread_name_prefix="metadaten")
+        laufend = set()
+        naechster = 0
+        try:
+            while naechster < len(stapel) or laufend:
+                # nur wenige Stapel im Voraus, damit ein Anhalten schnell greift und der Speicher klein bleibt
+                while naechster < len(stapel) and len(laufend) < 2 * METADATEN_THREADS and not self._stop.is_set():
+                    laufend.add(pool.submit(lesen, stapel[naechster]))
+                    naechster += 1
+                if not laufend:
+                    break
+                erledigt, laufend = wait(laufend, timeout=1.0, return_when=FIRST_COMPLETED)
+                for f in erledigt:
+                    infos = f.result()
+                    self._metadaten_speichern(infos)
+                    fertig += len(infos)
+                    rest = (len(pfade) - fertig) * (time.time() - t0) / max(1, fertig)
+                    self._setze(fertig=fertig, meldung=f"Lese Metadaten ... {_zahl(fertig)} von {_zahl(len(pfade))}, "
+                                                       f"noch etwa {_dauer_text(rest)}")
+                if self._stop.is_set() and naechster < len(stapel):
+                    naechster = len(stapel)  # nichts Neues mehr anfangen, laufende Stapel noch speichern
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+            for leser in leser_alle:
+                leser.schliessen()
+
+    def _metadaten_speichern(self, infos: list) -> None:
+        with self.db.verbindung() as v:
+            for info in infos:
+                try:
+                    st = info.pfad.stat()
+                except OSError:  # inzwischen gelöscht oder Laufwerk weg
+                    continue
+                if info.haengt:
+                    self._fehler(f"Metadaten {info.pfad.name}: Datei reagiert nicht (z. B. nur in der Cloud "
+                                 f"gespeichert oder Laufwerk antwortet nicht), wird übersprungen")
+                try:
+                    v.execute("""
+                        INSERT INTO bilder (pfad, groesse, mtime, datum, datum_quelle, hersteller, modell, kamera,
+                                            gps_lat, gps_lon, breite, hoehe, schlagwoerter, fehler)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(pfad) DO UPDATE SET groesse=excluded.groesse, mtime=excluded.mtime,
+                          datum=excluded.datum, datum_quelle=excluded.datum_quelle, hersteller=excluded.hersteller,
+                          modell=excluded.modell, kamera=excluded.kamera, gps_lat=excluded.gps_lat,
+                          gps_lon=excluded.gps_lon, breite=excluded.breite, hoehe=excluded.hoehe,
+                          schlagwoerter=excluded.schlagwoerter, clip=NULL, schritt_clip=0, schritt_ocr=0,
+                          schritt_gesichter=0, schritt_beschreibung=0, schritt_lang=0, fehler=excluded.fehler""",
+                              (str(info.pfad), st.st_size, st.st_mtime,
+                               info.datum.isoformat(sep=" ") if info.datum else None, info.datum_quelle,
+                               info.hersteller, info.modell, info.kamera, info.gps_lat, info.gps_lon,
+                               info.breite, info.hoehe, ", ".join(info.schlagwoerter),
+                               # hängende Datei nicht analysieren (das Öffnen bliebe genauso hängen);
+                               # ändert sie sich (z. B. heruntergeladen), wird sie neu eingelesen
+                               "Datei reagiert nicht beim Lesen" if info.haengt else None))
+                except Exception as ex:  # ein Bild mit seltsamen Metadaten bricht nicht den Lauf ab
+                    self._fehler(f"Metadaten {info.pfad.name}: {ex}")
+        # Suchtext (Dateiname, Ordner, Kamera) gleich anlegen: so findet die Suche neue Bilder schon
+        # während der Analyse läuft, und auch Dateien, die sich nicht analysieren lassen
+        pfade = [str(i.pfad) for i in infos]
+        self.db.suchtext_aktualisieren_viele(r["id"] for r in self.db.abfrage(
+            f"SELECT id FROM bilder WHERE pfad IN ({','.join('?' * len(pfade))})", pfade))
 
     # ---------------------------------------------------------- Schritt 2
 
@@ -806,6 +868,10 @@ class Indexer:
         log.warning(text)
         if len(self.status["fehler"]) < 50:
             self.status["fehler"].append(text)
+
+
+def _zahl(n: int) -> str:
+    return f"{n:,}".replace(",", ".")
 
 
 def _dauer_text(sek: float) -> str:

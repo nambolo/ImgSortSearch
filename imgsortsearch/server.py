@@ -44,7 +44,7 @@ class Zustand:
         self.dubletten = dubletten.Suche(self.db, vorschau_pfad, self.dubletten_stop)
         self.dubletten_ergebnis = None
         self.kacheln = orte.Kacheln()
-        self.indexer.nach_metadaten.append(self._orte_zuordnen)
+        self.indexer.nach_metadaten.append(lambda: self._orte_zuordnen(im_lauf=True))
         # ältere Indexe: Ortsnamen und Suchtext einmal nachtragen (geht schnell, es wird kein Bild geöffnet)
         threading.Thread(target=self._nachtragen, daemon=True).start()
 
@@ -55,9 +55,15 @@ class Zustand:
         except Exception:
             log.exception("Suchtext auffrischen fehlgeschlagen")
 
-    def _orte_zuordnen(self):
+    def _orte_zuordnen(self, im_lauf: bool = False):
+        def fortschritt(fertig, gesamt):
+            self.indexer._setze(fertig=fertig, gesamt=gesamt,
+                                meldung=f"Ortsnamen zu den GPS-Daten ... {fertig:,} von {gesamt:,}".replace(",", "."))
         try:
-            orte.orte_zuordnen(self.db)
+            if im_lauf:
+                orte.orte_zuordnen(self.db, stop=self.indexer._stop, fortschritt=fortschritt)
+            else:
+                orte.orte_zuordnen(self.db)
         except Exception:
             log.exception("Ortsnamen zuordnen fehlgeschlagen")
 

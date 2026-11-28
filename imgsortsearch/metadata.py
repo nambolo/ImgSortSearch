@@ -36,6 +36,7 @@ class BildInfo:
     breite: int | None = None
     hoehe: int | None = None
     schlagwoerter: list[str] = field(default_factory=list)
+    haengt: bool = False            # exiftool blieb an der Datei hängen (nicht lesbar)
 
     @property
     def kamera(self) -> str:
@@ -54,18 +55,43 @@ def exiftool_verfuegbar() -> bool:
 
 
 def finde_bilder(quelle: Path, videos: bool = False) -> list[Path]:
+    return [p for p, _, _ in finde_bilder_mit_stat(quelle, videos)]
+
+
+def finde_bilder_mit_stat(quelle: Path, videos: bool = False, gefunden=None) -> list[tuple[Path, int, float]]:
+    """Wie ``finde_bilder``, liefert aber gleich Größe und Änderungszeit mit: (Pfad, Größe, mtime).
+
+    Unter Windows stehen diese Angaben schon im Ordnerverzeichnis (os.scandir), dann muss nicht jede
+    Datei einzeln abgefragt werden. Bei 100.000+ Bildern auf einer externen Platte oder einem NAS
+    spart das viele Minuten. ``gefunden(n)`` wird ab und zu mit der bisherigen Anzahl aufgerufen."""
     endungen = BILD_ENDUNGEN | (VIDEO_ENDUNGEN if videos else set())
     treffer = []
-    for wurzel, ordner, dateien in os.walk(quelle):
-        # versteckte Ordner (.thumbnails, .Trash, @eaDir ...) überspringen
-        ordner[:] = [o for o in ordner if not o.startswith((".", "@"))]
-        for d in dateien:
-            if d.startswith("._"):
+    stapel = [str(quelle)]
+    while stapel:
+        ordner = stapel.pop()
+        try:
+            eintraege = list(os.scandir(ordner))
+        except OSError:  # keine Rechte, Laufwerk weg: wie os.walk überspringen
+            continue
+        for d in eintraege:
+            name = d.name
+            try:
+                if d.is_dir(follow_symlinks=False):
+                    # versteckte Ordner (.thumbnails, .Trash, @eaDir ...) überspringen,
+                    # Verknüpfungen/Junctions nicht verfolgen (wie os.walk)
+                    if not name.startswith((".", "@")) and not getattr(d, "is_junction", lambda: False)():
+                        stapel.append(d.path)
+                    continue
+                if name.startswith("._") or os.path.splitext(name)[1].lower() not in endungen:
+                    continue
+                st = d.stat()
+            except OSError:
                 continue
-            p = Path(wurzel) / d
-            if p.suffix.lower() in endungen:
-                treffer.append(p)
-    return sorted(treffer)
+            treffer.append((Path(d.path), st.st_size, st.st_mtime))
+            if gefunden is not None and len(treffer) % 2000 == 0:
+                gefunden(len(treffer))
+    treffer.sort(key=lambda t: t[0])
+    return treffer
 
 
 # ---------------------------------------------------------------- Datum
@@ -123,23 +149,140 @@ _EXIF_FELDER = [
 ]
 
 
-def lies_mit_exiftool(pfade: list[Path], stapel: int = 500) -> dict[Path, dict]:
-    ergebnis: dict[Path, dict] = {}
-    for i in range(0, len(pfade), stapel):
-        teil = pfade[i:i + stapel]
-        cmd = [shutil.which("exiftool") or "exiftool", "-json", "-n", "-fast", "-charset", "filename=utf8",
-               *_EXIF_FELDER, "-@", "-"]
-        eingabe = "\n".join(str(p) for p in teil)
+class ExiftoolLeser:
+    """Ein dauerhaft laufendes exiftool (-stay_open) zum Lesen vieler Dateien.
+
+    - Kein Programmstart je Stapel (unter Windows fast eine Sekunde, bei 180.000 Bildern sonst Minuten).
+    - Mit ``-progress`` meldet exiftool jede Datei, bevor es sie liest. Kommt eine Zeit lang keine Meldung,
+      hängt es an genau dieser Datei (z. B. eine OneDrive-Datei, die nur in der Cloud liegt, oder ein
+      Netzlaufwerk, das nicht antwortet). Dann wird exiftool neu gestartet, die Datei übersprungen und der
+      Rest weitergelesen. Früher blieb der ganze Indexlauf an so einer Datei für immer stehen."""
+
+    ZEITLIMIT = 60.0     # Sekunden ohne jede Meldung von exiftool, bis eine Datei als hängend gilt
+    MAX_HAENGER = 20     # je Stapel; danach den Rest ohne exiftool lesen
+
+    def __init__(self, exe: str | None = None):
+        self.exe = exe or shutil.which("exiftool") or "exiftool"
+        self.proc = None
+
+    def _starten(self) -> None:
+        import queue
+        import threading
+        self.proc = subprocess.Popen([self.exe, "-stay_open", "True", "-@", "-"], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.zeilen = queue.Queue()
+        proc, zeilen = self.proc, self.zeilen
+
+        def lesen(strom, art):
+            for zeile in iter(strom.readline, b""):
+                zeilen.put((art, zeile))
+            zeilen.put((art, None))  # Prozess beendet
+
+        threading.Thread(target=lesen, args=(proc.stdout, "aus"), daemon=True).start()
+        threading.Thread(target=lesen, args=(proc.stderr, "err"), daemon=True).start()
+
+    def schliessen(self, hart: bool = False) -> None:
+        proc, self.proc = self.proc, None
+        if proc is None or proc.poll() is not None:
+            return
         try:
-            # ohne CREATE_NO_WINDOW blitzt unter Windows bei jedem Stapel ein Konsolenfenster auf
-            proc = subprocess.run(cmd, input=eingabe.encode("utf-8"), capture_output=True,
-                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            eintraege = json.loads(proc.stdout.decode("utf-8", "replace")) if proc.stdout.strip() else []
+            if not hart:
+                proc.stdin.write(b"-stay_open\nFalse\n")
+                proc.stdin.flush()
+                proc.wait(timeout=10)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
+        if proc.poll() is None:
+            if os.name == "nt":
+                # exiftool.exe unter Windows startet selbst ein Perl: den ganzen Prozessbaum beenden
+                try:
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=15,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            if proc.poll() is None:
+                proc.kill()
+
+    def _befehl(self, pfade: list[Path]) -> tuple[list | None, int]:
+        """Ein Durchgang. Liefert (Einträge, -1) oder bei Hänger/Absturz (None, Index der hängenden Datei)."""
+        import queue
+        if self.proc is None or self.proc.poll() is not None:
+            self._starten()
+        self.nr = getattr(self, "nr", 0) + 1
+        marke = f"{{start{self.nr}}}".encode()
+        # -echo2: Marke auf stderr, damit späte Meldungen des vorigen Durchgangs nicht mitzählen
+        args = ["-echo2", marke.decode(), "-json", "-n", "-fast", "-progress", "-charset", "filename=utf8", *_EXIF_FELDER,
+                *(str(p) for p in pfade), "-execute"]
+        try:
+            self.proc.stdin.write(("\n".join(args) + "\n").encode("utf-8"))
+            self.proc.stdin.flush()
         except (OSError, ValueError):
-            continue  # Rest wird über Pillow gelesen
-        for eintrag in eintraege:
-            ergebnis[Path(eintrag.get("SourceFile", ""))] = eintrag
-    return ergebnis
+            self.schliessen(hart=True)
+            return None, -1
+        ausgabe: list[bytes] = []
+        aktuell, gestartet = -1, False
+        while True:
+            try:
+                art, zeile = self.zeilen.get(timeout=self.ZEITLIMIT)
+            except queue.Empty:
+                self.schliessen(hart=True)
+                return None, aktuell
+            if zeile is None:  # exiftool ist abgestürzt
+                self.schliessen(hart=True)
+                return None, aktuell
+            if art == "err":
+                gestartet = gestartet or zeile.strip() == marke
+                m = _FORTSCHRITT.search(zeile)
+                if gestartet and m and int(m.group(2)) == len(pfade):
+                    aktuell = int(m.group(1)) - 1
+                continue
+            if zeile.strip() == b"{ready}":
+                break
+            ausgabe.append(zeile)
+        text = b"".join(ausgabe).decode("utf-8", "replace")
+        try:
+            return (json.loads(text) if text.strip() else []), -1
+        except ValueError:
+            return [], -1
+
+    def lesen(self, pfade: list[Path]) -> tuple[dict[Path, dict], list[Path]]:
+        """(Ergebnisse je Pfad, Dateien, an denen exiftool hängen blieb)."""
+        rest, haenger = list(pfade), []
+        ergebnis: dict[Path, dict] = {}
+        while rest:
+            eintraege, idx = self._befehl(rest)
+            if eintraege is not None:
+                for e in eintraege:
+                    ergebnis[Path(e.get("SourceFile", ""))] = e
+                break
+            if not 0 <= idx < len(rest) or len(haenger) >= self.MAX_HAENGER:
+                break  # unklar, woran es lag: der Rest wird über Pillow gelesen
+            haenger.append(rest.pop(idx))
+        return ergebnis, haenger
+
+
+_FORTSCHRITT = re.compile(rb"\[(\d+)/(\d+)\]\s*$")
+
+
+def lies_mit_exiftool(pfade: list[Path], stapel: int = 500,
+                      leser: ExiftoolLeser | None = None) -> tuple[dict[Path, dict], list[Path]]:
+    eigener = leser is None
+    leser = leser or ExiftoolLeser()
+    ergebnis: dict[Path, dict] = {}
+    haenger: list[Path] = []
+    try:
+        for i in range(0, len(pfade), stapel):
+            try:
+                erg, h = leser.lesen(pfade[i:i + stapel])
+            except OSError:
+                continue  # exiftool lässt sich nicht starten: Rest wird über Pillow gelesen
+            ergebnis.update(erg)
+            haenger += h
+    finally:
+        if eigener:
+            leser.schliessen()
+    return ergebnis, haenger
 
 
 def _als_liste(wert) -> list[str]:
@@ -233,12 +376,22 @@ def _exif_auswerten(info: BildInfo, exif) -> None:
 
 # ---------------------------------------------------------------- gesamt
 
-def lies_metadaten(pfade: list[Path], exiftool: bool | None = None) -> list[BildInfo]:
+def lies_metadaten(pfade: list[Path], exiftool: bool | None = None,
+                   leser: ExiftoolLeser | None = None) -> list[BildInfo]:
     if exiftool is None:
         exiftool = exiftool_verfuegbar()
-    roh = lies_mit_exiftool(pfade) if exiftool else {}
+    roh, haenger = lies_mit_exiftool(pfade, leser=leser) if exiftool else ({}, [])
+    haenger = set(haenger)
     ergebnis = []
     for p in pfade:
+        if p in haenger:
+            # Nicht noch einmal mit Pillow öffnen, das bliebe genauso hängen
+            info = BildInfo(pfad=p, haengt=True)
+            dt = datum_aus_dateiname(p.name)
+            if dt:
+                info.datum, info.datum_quelle = dt, "dateiname"
+            ergebnis.append(info)
+            continue
         try:
             ergebnis.append(_eine_datei(p, roh))
         except Exception:  # ein einzelnes Bild darf nie den ganzen Lauf abbrechen
